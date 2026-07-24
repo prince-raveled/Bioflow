@@ -6,7 +6,6 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QTextEdit,
     QVBoxLayout,
-    QHBoxLayout,
 )
 
 import sys
@@ -17,10 +16,11 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
 
-        self.fastq_file = ""
+        # Store all selected FASTQ files
+        self.fastq_files = []
 
         self.setWindowTitle("BioFlow v0.1")
-        self.setGeometry(300, 200, 600, 350)
+        self.setGeometry(300, 200, 650, 400)
 
         self.build_ui()
 
@@ -32,63 +32,73 @@ class MainWindow(QWidget):
         title.setStyleSheet("font-size:20px;font-weight:bold;")
         layout.addWidget(title)
 
-        self.file_label = QLabel("No FASTQ selected")
+        self.file_label = QLabel("No FASTQ files selected")
         layout.addWidget(self.file_label)
 
-        browse_btn = QPushButton("Browse FASTQ")
-
+        browse_btn = QPushButton("Add FASTQ Files")
         browse_btn.clicked.connect(self.select_fastq)
-
         layout.addWidget(browse_btn)
 
         run_btn = QPushButton("Run FastQC")
-
         run_btn.clicked.connect(self.run_fastqc)
-
         layout.addWidget(run_btn)
 
         self.log = QTextEdit()
-
         self.log.setReadOnly(True)
-
         layout.addWidget(self.log)
 
         self.setLayout(layout)
 
     def select_fastq(self):
 
-        filename, _ = QFileDialog.getOpenFileName(
+        filenames, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select FASTQ",
+            "Select FASTQ Files",
             "",
-            "FASTQ Files (*.fastq *.fastq.gz)"
+            "FASTQ Files (*.fastq *.fastq.gz *.fq *.fq.gz)"
         )
 
-        if filename:
+        if not filenames:
+            return
 
-            self.fastq_file = filename
+        # Add new files
+        self.fastq_files.extend(filenames)
 
-            self.file_label.setText(filename)
+        # Remove duplicates while preserving order
+        self.fastq_files = list(dict.fromkeys(self.fastq_files))
 
-            self.log.append("FASTQ Selected")
+        # Update label
+        self.file_label.setText(
+            f"{len(self.fastq_files)} FASTQ files selected"
+        )
 
-            self.log.append(filename)
+        # Log newly added files
+        self.log.append(f"\nAdded {len(filenames)} file(s):")
+
+        for file in filenames:
+            self.log.append(f"• {file}")
 
     def run_fastqc(self):
 
-        if self.fastq_file == "":
-
-            self.log.append("No FASTQ selected")
-
+        if not self.fastq_files:
+            self.log.append("❌ No FASTQ files selected.\n")
             return
 
-        self.log.append("Starting FastQC...")
+        self.log.append("\n========== Starting FastQC ==========")
 
-        #
-        # We will connect Runner here
-        #
+        for file in self.fastq_files:
 
-        self.log.append("FastQC Finished")
+            self.log.append(f"Running FastQC on:")
+            self.log.append(f"   {file}")
+            self.log.append("Status : Pending Backend\n")
+
+            #
+            # Later:
+            #
+            # FastQC(file).run()
+            #
+
+        self.log.append("========== FastQC Finished ==========\n")
 
 
 if __name__ == "__main__":
