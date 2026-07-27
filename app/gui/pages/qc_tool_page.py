@@ -10,12 +10,14 @@ from PyQt6.QtWidgets import QFileDialog, QLabel, QPushButton, QTextEdit, QVBoxLa
 class QCToolPage(QWidget):
     """Base page that runs one command without blocking the Qt interface."""
 
-    def __init__(self, tool_name: str):
+    def __init__(self, tool_name: str, environment_name: str = "bioflow-qc"):
         super().__init__()
         self.tool_name = tool_name
+        self.environment_name = environment_name
         self.output_directory: Path | None = None
         self.output_selected_by_user = False
         self.process: QProcess | None = None
+        self._stderr_log_handle = None
         self.setObjectName("toolPage")
 
         self.layout = QVBoxLayout(self)
@@ -93,8 +95,8 @@ class QCToolPage(QWidget):
                 if self.output_directory else "Output folder: not selected"
             )
 
-    def start_tool(self, command: list[str]):
-        """Run a QC tool directly or in the documented ``bioflow-qc`` env."""
+    def start_tool(self, command: list[str], stderr_log: Path | None = None):
+        """Run a tool directly or in its configured Conda/Micromamba environment."""
         if self.process is not None:
             self.add_log(f"{self.tool_name} is already running.")
             return
@@ -102,13 +104,16 @@ class QCToolPage(QWidget):
         executable = shutil.which(command[0])
         if executable:
             program, arguments = executable, command[1:]
+        elif shutil.which("micromamba"):
+            program = "micromamba"
+            arguments = ["run", "-n", self.environment_name, *command]
         elif shutil.which("conda"):
             program = "conda"
-            arguments = ["run", "--no-capture-output", "-n", "bioflow-qc", *command]
+            arguments = ["run", "--no-capture-output", "-n", self.environment_name, *command]
         else:
             self.add_log(
                 f"Cannot start {self.tool_name}: install {command[0]} on PATH "
-                "or create the Conda environment 'bioflow-qc'."
+                f"or create the environment '{self.environment_name}'."
             )
             return
 
@@ -118,6 +123,9 @@ class QCToolPage(QWidget):
         self.process.readyReadStandardError.connect(self._read_stderr)
         self.process.errorOccurred.connect(self._process_error)
         self.process.finished.connect(self._process_finished)
+
+        if stderr_log:
+            self._stderr_log_handle = stderr_log.open("w", encoding="utf-8")
 
         self._set_running(True)
         self.add_log(f"Starting: {program} {' '.join(arguments)}")
@@ -131,12 +139,17 @@ class QCToolPage(QWidget):
 
     def _read_stderr(self):
         if self.process:
-            self.add_log(bytes(self.process.readAllStandardError()).decode(errors="replace").rstrip())
+            output = bytes(self.process.readAllStandardError()).decode(errors="replace")
+            if self._stderr_log_handle:
+                self._stderr_log_handle.write(output)
+                self._stderr_log_handle.flush()
+            self.add_log(output.rstrip())
 
     def _process_error(self, error):
         if self.process:
             self.add_log(f"Process error: {self.process.errorString()}")
             if error == QProcess.ProcessError.FailedToStart:
+                self._close_stderr_log()
                 self.process = None
                 self._set_running(False)
 
@@ -147,8 +160,14 @@ class QCToolPage(QWidget):
             self.add_log(f"{self.tool_name} finished successfully. Results: {self.output_directory}")
         else:
             self.add_log(f"{self.tool_name} failed with exit code {exit_code}. See the log above.")
+        self._close_stderr_log()
         self.process = None
         self._set_running(False)
+
+    def _close_stderr_log(self):
+        if self._stderr_log_handle:
+            self._stderr_log_handle.close()
+            self._stderr_log_handle = None
 
     def _set_running(self, running: bool):
         self.run_button.setDisabled(running)
