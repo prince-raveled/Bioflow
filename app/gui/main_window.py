@@ -1,9 +1,10 @@
 """BioFlow's quality-control desktop interface."""
 
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QStackedWidget, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QStackedWidget, QVBoxLayout, QWidget
 
 from gui.pages.fastp_page import FastPPage
 from gui.pages.fastqc_page import FastQCPage
+from gui.pages.host_removal_page import HostRemovalPage
 from gui.pages.multiqc_page import MultiQCPage
 from gui.widgets.nucleotide_loom import NucleotideLoom
 from gui.widgets.sidebar import Sidebar
@@ -34,6 +35,10 @@ QSlider::groove:horizontal { background: #D8C6A8; border: 1px solid #C2A57B; bor
 QSlider::sub-page:horizontal { background: #83916B; border-radius: 4px; }
 QSlider::handle:horizontal { background: #995C4A; border: 2px solid #734231; border-radius: 10px; margin: -6px 0; width: 18px; }
 QSlider::handle:horizontal:hover { background: #B76D57; }
+QComboBox { background: #FFF9EE; border: 1px solid #C9B38E; border-radius: 7px; min-height: 27px; padding: 2px 8px; }
+QComboBox::drop-down { border: 0; width: 24px; }
+QComboBox QAbstractItemView { background: #FFF9EE; border: 1px solid #C9B38E; selection-background-color: #E9DDC9; }
+QScrollArea { border: 0; background: transparent; }
 QTextEdit#executionLog { background: #2F2924; border: 3px solid #83916B; border-radius: 9px; color: #F7EAD3; font-family: 'DejaVu Sans Mono', monospace; font-size: 12px; padding: 8px; }
 QScrollBar:vertical { background: #E9DDC9; width: 11px; margin: 3px; }
 QScrollBar::handle:vertical { background: #995C4A; border-radius: 5px; min-height: 24px; }
@@ -63,9 +68,19 @@ class MainWindow(QWidget):
         content.addWidget(self.sidebar)
 
         self.pages = QStackedWidget()
-        self.page_by_name = {"FastQC": FastQCPage(), "fastp": FastPPage(), "MultiQC": MultiQCPage()}
-        for page in self.page_by_name.values():
-            self.pages.addWidget(page)
+        self.page_by_name = {
+            "FastQC": FastQCPage(),
+            "fastp": FastPPage(),
+            "MultiQC": MultiQCPage(),
+            "Host Removal": HostRemovalPage(),
+        }
+        self.page_containers = {}
+        for name, page in self.page_by_name.items():
+            container = QScrollArea()
+            container.setWidgetResizable(True)
+            container.setWidget(page)
+            self.page_containers[name] = container
+            self.pages.addWidget(container)
         content.addWidget(self.pages, 1)
         root.addLayout(content, 1)
 
@@ -88,6 +103,6 @@ class MainWindow(QWidget):
         return header
 
     def show_page(self, item, _column):
-        page = self.page_by_name.get(item.text(0))
-        if page:
-            self.pages.setCurrentWidget(page)
+        container = self.page_containers.get(item.text(0))
+        if container:
+            self.pages.setCurrentWidget(container)
