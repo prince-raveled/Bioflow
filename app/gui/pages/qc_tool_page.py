@@ -1,6 +1,7 @@
 """Reusable Qt components for BioFlow quality-control tools."""
 
 from pathlib import Path
+import os
 import shutil
 
 from PyQt6.QtCore import QProcess
@@ -104,9 +105,12 @@ class QCToolPage(QWidget):
         executable = shutil.which(command[0])
         if executable:
             program, arguments = executable, command[1:]
-        elif shutil.which("micromamba"):
-            program = "micromamba"
-            arguments = ["run", "-n", self.environment_name, *command]
+        elif micromamba := (os.environ.get("BIOFLOW_MICROMAMBA") or shutil.which("micromamba")):
+            program = micromamba
+            arguments = ["run"]
+            if root_prefix := os.environ.get("BIOFLOW_MAMBA_ROOT_PREFIX"):
+                arguments.extend(["-r", root_prefix])
+            arguments.extend(["-n", self.environment_name, *command])
         elif shutil.which("conda"):
             program = "conda"
             arguments = ["run", "--no-capture-output", "-n", self.environment_name, *command]
