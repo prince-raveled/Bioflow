@@ -1,6 +1,7 @@
 """Host-read removal with Bowtie2 and a configured human reference index."""
 
 from pathlib import Path
+import os
 import re
 
 from PyQt6.QtCore import Qt
@@ -74,6 +75,7 @@ class HostRemovalPage(QCToolPage):
         index_button = QPushButton("Select all 6 GRCh38 index files")
         index_button.clicked.connect(self._select_index_files)
         self.controls.addWidget(index_button)
+        self._load_configured_index()
 
         thread_row = QHBoxLayout()
         thread_row.addWidget(QLabel("Threads"))
@@ -153,6 +155,15 @@ class HostRemovalPage(QCToolPage):
         )
         self.add_log(f"Verified complete GRCh38 Bowtie2 index: {self.index_prefix}")
 
+    def _load_configured_index(self):
+        """Use the reference installed by BioFlow's Linux launcher when present."""
+        configured_prefix = os.environ.get("BIOFLOW_GRCH38_INDEX")
+        if configured_prefix and self._index_prefix_is_complete(Path(configured_prefix)):
+            self.index_prefix = Path(configured_prefix)
+            self.index_label.setText(
+                f"GRCh38 index ready (BioFlow setup): {self.index_prefix}"
+            )
+
     @staticmethod
     def _find_complete_index(index_files: list[Path]) -> Path | None:
         """Return a prefix only when the user selected all six matching files."""
@@ -167,6 +178,14 @@ class HostRemovalPage(QCToolPage):
                 if expected_files.issubset(selected_files):
                     return prefix
         return None
+
+    @staticmethod
+    def _index_prefix_is_complete(prefix: Path) -> bool:
+        required_parts = ("1", "2", "3", "4", "rev.1", "rev.2")
+        return any(
+            all(Path(f"{prefix}.{part}.{extension}").is_file() for part in required_parts)
+            for extension in ("bt2", "bt2l")
+        )
 
     @staticmethod
     def _sample_name(file_name: str) -> str:
