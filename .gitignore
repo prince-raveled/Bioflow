@@ -1,3 +1,10 @@
 __pycache__/
 *.py[cod]
 .venv/
+output/
+bioflow_results/
+.vscode/
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
