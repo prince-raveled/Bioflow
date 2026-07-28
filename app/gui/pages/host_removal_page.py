@@ -110,6 +110,7 @@ class HostRemovalPage(QCToolPage):
             + (f"  •  {len(unmatched)} file(s) could not be paired" if unmatched else "")
         )
         self.add_log(f"Selected {len(files)} paired-end FASTQ files; detected {len(pairs)} pair(s).")
+        self.set_input_summary(f"{len(pairs)} paired sample(s) detected")
         if unmatched:
             self.add_log("Unpaired files: " + ", ".join(Path(file_name).name for file_name in unmatched))
         self._set_default_output_from_files(files)
@@ -122,6 +123,7 @@ class HostRemovalPage(QCToolPage):
             return
         self.single_fastq_files = files
         self.single_label.setText(f"{len(files)} single-end FASTQ file(s) selected")
+        self.set_input_summary(f"{len(files)} single-end sample(s) staged")
         self.add_log(f"Selected {len(files)} single-end FASTQ file(s).")
         self._set_default_output_from_files(files)
 

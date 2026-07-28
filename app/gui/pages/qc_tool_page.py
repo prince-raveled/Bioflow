@@ -1,11 +1,17 @@
 """Reusable Qt components for BioFlow quality-control tools."""
 
 from pathlib import Path
+from datetime import datetime
 import os
 import shutil
+import shlex
 
 from PyQt6.QtCore import QProcess
-from PyQt6.QtWidgets import QFileDialog, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget
+from PyQt6.QtCore import QUrl
+from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtWidgets import QFrame, QFileDialog, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget
+
+from backend.history import RunHistory
 
 
 class QCToolPage(QWidget):
@@ -18,14 +24,16 @@ class QCToolPage(QWidget):
         self.output_directory: Path | None = None
         self.output_selected_by_user = False
         self.process: QProcess | None = None
-        self._stderr_log_handle = None
+        self._execution_log_handle = None
+        self._history_run_id: int | None = None
+        self._history_input_summary = "No input summary recorded"
         self.setObjectName("toolPage")
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(34, 30, 34, 30)
         self.layout.setSpacing(14)
 
-        eyebrow = QLabel("QUALITY CONTROL")
+        eyebrow = QLabel("Quality control")
         eyebrow.setObjectName("eyebrow")
         self.layout.addWidget(eyebrow)
 
@@ -38,10 +46,6 @@ class QCToolPage(QWidget):
         self.description.setWordWrap(True)
         self.layout.addWidget(self.description)
 
-        ornament = QLabel("✦  ✦  ✦")
-        ornament.setObjectName("ornament")
-        self.layout.addWidget(ornament)
-
         self.controls = QVBoxLayout()
         self.layout.addLayout(self.controls)
 
@@ -50,7 +54,21 @@ class QCToolPage(QWidget):
         self.run_button.clicked.connect(self.run_analysis)
         self.layout.addWidget(self.run_button)
 
-        log_title = QLabel("FIELD NOTES  /  EXECUTION LOG")
+        self.result_card = QFrame()
+        self.result_card.setObjectName("resultCard")
+        result_layout = QHBoxLayout(self.result_card)
+        result_layout.setContentsMargins(14, 9, 14, 9)
+        self.result_label = QLabel("No completed run yet")
+        self.result_label.setObjectName("resultLabel")
+        result_layout.addWidget(self.result_label, 1)
+        self.open_results_button = QPushButton("Open output")
+        self.open_results_button.setObjectName("openResultsButton")
+        self.open_results_button.setEnabled(False)
+        self.open_results_button.clicked.connect(self._open_results_directory)
+        result_layout.addWidget(self.open_results_button)
+        self.layout.addWidget(self.result_card)
+
+        log_title = QLabel("Run log")
         log_title.setObjectName("logTitle")
         self.layout.addWidget(log_title)
         self.log = QTextEdit()
@@ -96,6 +114,15 @@ class QCToolPage(QWidget):
                 if self.output_directory else "Output folder: not selected"
             )
 
+    def set_input_summary(self, summary: str):
+        """Show a concise sample-queue message without changing execution logic."""
+        self._history_input_summary = summary
+        self.result_label.setText(summary)
+
+    def _open_results_directory(self):
+        if self.output_directory and self.output_directory.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.output_directory)))
+
     def start_tool(self, command: list[str], stderr_log: Path | None = None):
         """Run a tool directly or in its configured Conda/Micromamba environment."""
         if self.process is not None:
@@ -128,8 +155,17 @@ class QCToolPage(QWidget):
         self.process.errorOccurred.connect(self._process_error)
         self.process.finished.connect(self._process_finished)
 
-        if stderr_log:
-            self._stderr_log_handle = stderr_log.open("w", encoding="utf-8")
+        log_path = stderr_log or self._default_log_path()
+        if log_path:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._execution_log_handle = log_path.open("w", encoding="utf-8")
+        self._history_run_id = RunHistory.start_run(
+            tool_name=self.tool_name,
+            input_summary=self._history_input_summary,
+            output_directory=str(self.output_directory) if self.output_directory else None,
+            command=shlex.join([program, *arguments]),
+            log_path=str(log_path) if log_path else None,
+        )
 
         self._set_running(True)
         self.add_log(f"Starting: {program} {' '.join(arguments)}")
@@ -144,16 +180,14 @@ class QCToolPage(QWidget):
     def _read_stderr(self):
         if self.process:
             output = bytes(self.process.readAllStandardError()).decode(errors="replace")
-            if self._stderr_log_handle:
-                self._stderr_log_handle.write(output)
-                self._stderr_log_handle.flush()
             self.add_log(output.rstrip())
 
     def _process_error(self, error):
         if self.process:
             self.add_log(f"Process error: {self.process.errorString()}")
             if error == QProcess.ProcessError.FailedToStart:
-                self._close_stderr_log()
+                RunHistory.finish_run(self._history_run_id, "failed", None)
+                self._close_execution_log()
                 self.process = None
                 self._set_running(False)
 
@@ -162,16 +196,31 @@ class QCToolPage(QWidget):
         self._read_stderr()
         if exit_code == 0:
             self.add_log(f"{self.tool_name} finished successfully. Results: {self.output_directory}")
+            self.result_label.setText(f"Completed — {self.output_directory}")
+            self.open_results_button.setEnabled(True)
         else:
             self.add_log(f"{self.tool_name} failed with exit code {exit_code}. See the log above.")
-        self._close_stderr_log()
+        RunHistory.finish_run(
+            self._history_run_id, "completed" if exit_code == 0 else "failed", exit_code
+        )
+        self._history_run_id = None
+        self._close_execution_log()
         self.process = None
         self._set_running(False)
 
-    def _close_stderr_log(self):
-        if self._stderr_log_handle:
-            self._stderr_log_handle.close()
-            self._stderr_log_handle = None
+    def _default_log_path(self) -> Path | None:
+        if self.output_directory is None:
+            return None
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        safe_tool_name = "".join(
+            character.lower() if character.isalnum() else "_" for character in self.tool_name
+        ).strip("_")
+        return self.output_directory / "logs" / f"{timestamp}_{safe_tool_name}.log"
+
+    def _close_execution_log(self):
+        if self._execution_log_handle:
+            self._execution_log_handle.close()
+            self._execution_log_handle = None
 
     def _set_running(self, running: bool):
         self.run_button.setDisabled(running)
@@ -190,3 +239,6 @@ class QCToolPage(QWidget):
     def add_log(self, message: str):
         if message:
             self.log.append(message)
+            if self._execution_log_handle:
+                self._execution_log_handle.write(f"{message}\n")
+                self._execution_log_handle.flush()

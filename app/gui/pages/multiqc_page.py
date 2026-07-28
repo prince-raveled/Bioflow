@@ -34,6 +34,7 @@ class MultiQCPage(QCToolPage):
             selected_parent = Path(files[0]).resolve().parent
             self.set_default_output_directory(selected_parent / "multiqc")
             self.input_label.setText("Selected report files:\n" + "\n".join(files))
+            self.set_input_summary(f"{len(files)} QC report file(s) staged for MultiQC")
             self.add_log(f"Selected {len(files)} report file(s) for MultiQC.")
 
     def run_analysis(self):

@@ -48,6 +48,8 @@ class FastPPage(QCToolPage):
                 Path(files[0]).resolve().parent / "bioflow_results" / "fastp"
             )
             self.file_label.setText("\n".join(files))
+            read_layout = "single-end" if len(files) == 1 else "paired-end"
+            self.set_input_summary(f"1 {read_layout} sample staged for fastp")
             self.add_log(f"Selected {len(files)} FASTQ file(s).")
 
     @staticmethod

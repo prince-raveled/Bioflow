@@ -50,6 +50,7 @@ class FastQCPage(QCToolPage):
                 Path(files[0]).resolve().parent / "bioflow_results" / "fastqc"
             )
             self.file_label.setText("\n".join(files))
+            self.set_input_summary(f"{len(files)} FASTQ file(s) staged for FastQC")
             self.add_log(f"Selected {len(files)} FASTQ file(s).")
 
     def run_analysis(self):

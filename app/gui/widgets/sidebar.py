@@ -16,7 +16,7 @@ class Sidebar(QTreeWidget):
 
     def build_tree(self):
 
-        quality = QTreeWidgetItem(["QUALITY CONTROL"])
+        quality = QTreeWidgetItem(["Quality control"])
 
         fastqc = QTreeWidgetItem(["FastQC"])
         fastp = QTreeWidgetItem(["fastp"])
@@ -28,11 +28,15 @@ class Sidebar(QTreeWidget):
 
         self.addTopLevelItem(quality)
 
-        host_removal = QTreeWidgetItem(["HOST REMOVAL"])
+        host_removal = QTreeWidgetItem(["Host removal"])
         host_removal.addChild(QTreeWidgetItem(["Host Removal"]))
         self.addTopLevelItem(host_removal)
 
-        for section in (quality, host_removal):
+        history = QTreeWidgetItem(["History"])
+        history.addChild(QTreeWidgetItem(["Run History"]))
+        self.addTopLevelItem(history)
+
+        for section in (quality, host_removal, history):
             section.setFlags(section.flags() & ~Qt.ItemFlag.ItemIsSelectable)
             section_font = QFont(section.font(0))
             section_font.setBold(True)
@@ -42,4 +46,5 @@ class Sidebar(QTreeWidget):
 
         quality.setExpanded(True)
         host_removal.setExpanded(True)
+        history.setExpanded(True)
         self.setCurrentItem(fastqc)
