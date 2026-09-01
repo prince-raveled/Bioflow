@@ -1,10 +1,24 @@
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPushButton, QSlider
+from PyQt6.QtWidgets import (
+    QComboBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSlider,
+)
 
+from backend.samples import FASTQ_FILE_FILTER, ReadLayout
 from gui.pages.qc_tool_page import QCToolPage
-from gui.pages.fastqc_page import FASTQ_FILTER
+
+
+#: The two modes fastp supports, paired with the layout the backend models.
+LAYOUT_OPTIONS = (
+    ("Single-end", ReadLayout.SINGLE),
+    ("Paired-end", ReadLayout.PAIRED),
+)
 
 
 class FastPPage(QCToolPage):
@@ -18,6 +32,21 @@ class FastPPage(QCToolPage):
         self.file_label = QLabel("No FASTQ file(s) selected")
         self.file_label.setWordWrap(True)
         self.controls.addWidget(self.file_label)
+
+        # fastp genuinely has two modes, so the layout is stated rather than
+        # merely inferred. Selecting files still sets this automatically; the
+        # control lets the user correct that choice before running.
+        layout_row = QHBoxLayout()
+        layout_row.addWidget(QLabel("Read layout"))
+        self.layout_choice = QComboBox()
+        for option in LAYOUT_OPTIONS:
+            self.layout_choice.addItem(option[0])
+        self.layout_choice.currentIndexChanged.connect(self._show_layout_expectation)
+        layout_row.addWidget(self.layout_choice)
+        self.layout_hint = QLabel("")
+        self.layout_hint.setObjectName("componentDescription")
+        layout_row.addWidget(self.layout_hint, 1)
+        self.controls.addLayout(layout_row)
 
         row = QHBoxLayout()
         self.browse_button = QPushButton("Browse one or two FASTQ files")
@@ -36,20 +65,37 @@ class FastPPage(QCToolPage):
         row.addWidget(self.thread_count)
         self.controls.addLayout(row)
         self.add_output_selector()
+        self._show_layout_expectation()
+
+    @property
+    def read_layout(self) -> ReadLayout:
+        """The layout the user has selected."""
+        return LAYOUT_OPTIONS[self.layout_choice.currentIndex()][1]
+
+    def _show_layout_expectation(self):
+        expected = 2 if self.read_layout is ReadLayout.PAIRED else 1
+        self.layout_hint.setText(
+            f"expects {expected} FASTQ file{'s' if expected == 2 else ''}"
+        )
 
     def _show_thread_count(self, value: int):
         self.thread_count.setText(f"{value:02d}")
 
     def select_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Select one or two FASTQ files", "", FASTQ_FILTER)
+        files, _ = QFileDialog.getOpenFileNames(self, "Select one or two FASTQ files", "", FASTQ_FILE_FILTER)
         if files:
             self.fastq_files = files
             self.set_default_output_directory(
                 Path(files[0]).resolve().parent / "bioflow_results" / "fastp"
             )
             self.file_label.setText("\n".join(files))
-            read_layout = "single-end" if len(files) == 1 else "paired-end"
-            self.set_input_summary(f"1 {read_layout} sample staged for fastp")
+            detected = ReadLayout.PAIRED if len(files) == 2 else ReadLayout.SINGLE
+            self.layout_choice.setCurrentIndex(
+                next(i for i, (_, layout) in enumerate(LAYOUT_OPTIONS) if layout is detected)
+            )
+            self.set_input_summary(
+                f"1 {detected.label.lower()} sample staged for fastp"
+            )
             self.add_log(f"Selected {len(files)} FASTQ file(s).")
 
     @staticmethod
@@ -62,8 +108,12 @@ class FastPPage(QCToolPage):
         return f"{path.stem}.trimmed.fastq.gz"
 
     def run_analysis(self):
-        if len(self.fastq_files) not in (1, 2):
-            self.add_log("fastp requires one single-end file or exactly two paired-end files.")
+        expected = 2 if self.read_layout is ReadLayout.PAIRED else 1
+        if len(self.fastq_files) != expected:
+            self.add_log(
+                f"{self.read_layout.label} trimming needs exactly {expected} FASTQ "
+                f"file{'s' if expected == 2 else ''}; {len(self.fastq_files)} selected."
+            )
             return
         assert self.output_directory is not None
         self.output_directory.mkdir(parents=True, exist_ok=True)

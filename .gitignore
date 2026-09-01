@@ -1,10 +1,119 @@
+# ----------------------------------------------------------------------
+# Python
+# ----------------------------------------------------------------------
 __pycache__/
 *.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments (the development one lives in .venv)
 .venv/
+venv/
+env/
+ENV/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+
+# ----------------------------------------------------------------------
+# Editors and operating systems
+# ----------------------------------------------------------------------
+# Share the project's VS Code setup, but not personal editor state.
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# ----------------------------------------------------------------------
+# BioFlow runtime state
+#
+# BioFlow keeps its runtime, environments, databases and history outside the
+# repository (~/.local/share/bioflow by default). These rules only guard
+# against a data directory being pointed at a checkout.
+# ----------------------------------------------------------------------
+/config.json
+bioflow-project.json
+bioflow-run.json
+history.sqlite3
+*.sqlite3
+*.db
+micromamba-root/
+/bin/micromamba
+
+# Analysis output and logs
 output/
+outputs/
+results/
 bioflow_results/
-.vscode/
+logs/
+*.log
+
+# ----------------------------------------------------------------------
+# Sequencing data and reference resources
+#
+# None of this belongs in version control. Downloaded references live in
+# BioFlow's managed database directory, not here.
+# ----------------------------------------------------------------------
+# Reads
 *.fastq
-*.fastq.gz
 *.fq
+*.fastq.gz
 *.fq.gz
+*.sra
+
+# Alignments
+*.bam
+*.sam
+*.cram
+*.bai
+*.crai
+
+# References and indexes
+*.fa
+*.fna
+*.fasta
+*.fa.gz
+*.fna.gz
+*.fasta.gz
+*.bt2
+*.bt2l
+*.dmnd
+*.pkl
+*.nwk
+
+# Downloaded database archives
+*.tar.gz
+*.tar.bz2
+*.tgz
+databases/
+dbs/
+
+# ----------------------------------------------------------------------
+# Secrets - never commit these
+# ----------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+.netrc
+.pypirc
+credentials.json

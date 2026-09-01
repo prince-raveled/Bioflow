@@ -2,8 +2,6 @@
 
 from pathlib import Path
 from datetime import datetime
-import os
-import shutil
 import shlex
 
 from PyQt6.QtCore import QProcess
@@ -11,16 +9,20 @@ from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QFrame, QFileDialog, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget
 
+from backend.config import get_config
+from backend.execution.environment import EnvironmentResolver, MissingBackend
 from backend.history import RunHistory
+from gui.widgets.status_badge import StatusBadge
 
 
 class QCToolPage(QWidget):
     """Base page that runs one command without blocking the Qt interface."""
 
-    def __init__(self, tool_name: str, environment_name: str = "bioflow-qc"):
+    def __init__(self, tool_name: str, environment_key: str = "qc"):
         super().__init__()
         self.tool_name = tool_name
-        self.environment_name = environment_name
+        #: Key from backend.setup.registry; the name it maps to is configurable.
+        self.environment_key = environment_key
         self.output_directory: Path | None = None
         self.output_selected_by_user = False
         self.process: QProcess | None = None
@@ -58,8 +60,11 @@ class QCToolPage(QWidget):
         self.result_card.setObjectName("resultCard")
         result_layout = QHBoxLayout(self.result_card)
         result_layout.setContentsMargins(14, 9, 14, 9)
+        self.result_badge = StatusBadge("IDLE", "idle")
+        result_layout.addWidget(self.result_badge)
         self.result_label = QLabel("No completed run yet")
         self.result_label.setObjectName("resultLabel")
+        self.result_label.setWordWrap(True)
         result_layout.addWidget(self.result_label, 1)
         self.open_results_button = QPushButton("Open output")
         self.open_results_button.setObjectName("openResultsButton")
@@ -123,29 +128,28 @@ class QCToolPage(QWidget):
         if self.output_directory and self.output_directory.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.output_directory)))
 
+    def _resolve_command(self, command: list[str]) -> tuple[str, list[str]]:
+        """Resolve strictly against BioFlow's own managed environment.
+
+        There is deliberately no fallback to a tool on PATH, to a system
+        Micromamba, or to `conda run`: a result must be traceable to the
+        environment BioFlow installed. A missing backend raises MissingBackend,
+        which names the component to install.
+        """
+        return EnvironmentResolver(get_config()).resolve(self.environment_key, command)
+
     def start_tool(self, command: list[str], stderr_log: Path | None = None):
-        """Run a tool directly or in its configured Conda/Micromamba environment."""
+        """Run a tool inside BioFlow's managed environment for it."""
         if self.process is not None:
             self.add_log(f"{self.tool_name} is already running.")
             return
 
-        executable = shutil.which(command[0])
-        if executable:
-            program, arguments = executable, command[1:]
-        elif micromamba := (os.environ.get("BIOFLOW_MICROMAMBA") or shutil.which("micromamba")):
-            program = micromamba
-            arguments = ["run"]
-            if root_prefix := os.environ.get("BIOFLOW_MAMBA_ROOT_PREFIX"):
-                arguments.extend(["-r", root_prefix])
-            arguments.extend(["-n", self.environment_name, *command])
-        elif shutil.which("conda"):
-            program = "conda"
-            arguments = ["run", "--no-capture-output", "-n", self.environment_name, *command]
-        else:
-            self.add_log(
-                f"Cannot start {self.tool_name}: install {command[0]} on PATH "
-                f"or create the environment '{self.environment_name}'."
-            )
+        try:
+            program, arguments = self._resolve_command(command)
+        except MissingBackend as error:
+            self.add_log(f"Cannot start {self.tool_name}. {error}")
+            self.result_badge.set_state("BLOCKED", "warn")
+            self.result_label.setText(str(error))
             return
 
         self.process = QProcess(self)
@@ -168,6 +172,7 @@ class QCToolPage(QWidget):
         )
 
         self._set_running(True)
+        self.result_badge.set_state("RUNNING", "running")
         self.add_log(f"Starting: {program} {' '.join(arguments)}")
         if self.output_directory:
             self.add_log(f"Writing results to: {self.output_directory}")
@@ -180,7 +185,17 @@ class QCToolPage(QWidget):
     def _read_stderr(self):
         if self.process:
             output = bytes(self.process.readAllStandardError()).decode(errors="replace")
-            self.add_log(output.rstrip())
+            self.add_log(self._clean_tool_output(output).rstrip())
+
+    @staticmethod
+    def _clean_tool_output(output: str) -> str:
+        """Hide known harmless launcher fallbacks while retaining real diagnostics."""
+        ignored_lines = {
+            "[WARNING] Failed to launch x86-64-v3 version, staying with default",
+        }
+        return "\n".join(
+            line for line in output.splitlines() if line.strip() not in ignored_lines
+        )
 
     def _process_error(self, error):
         if self.process:
@@ -196,9 +211,12 @@ class QCToolPage(QWidget):
         self._read_stderr()
         if exit_code == 0:
             self.add_log(f"{self.tool_name} finished successfully. Results: {self.output_directory}")
-            self.result_label.setText(f"Completed — {self.output_directory}")
+            self.result_badge.set_state("COMPLETED", "ok")
+            self.result_label.setText(f"Results written to {self.output_directory}")
             self.open_results_button.setEnabled(True)
         else:
+            self.result_badge.set_state("FAILED", "error")
+            self.result_label.setText(f"Exit code {exit_code} — see the run log below")
             self.add_log(f"{self.tool_name} failed with exit code {exit_code}. See the log above.")
         RunHistory.finish_run(
             self._history_run_id, "completed" if exit_code == 0 else "failed", exit_code

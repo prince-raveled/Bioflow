@@ -1,7 +1,0 @@
-PyQt6
-pandas
-matplotlib
-plotly
-jinja2
-biopython
-nextflow

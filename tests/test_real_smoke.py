@@ -1,0 +1,282 @@
+"""REAL execution tests: these invoke genuine tools from BioFlow's own runtime.
+
+Unlike every other test file, nothing here is mocked. Each test is skipped
+unless the managed environment it needs is actually installed, so the suite
+still passes on a machine that has not run Setup yet.
+"""
+
+from pathlib import Path
+import tempfile
+import unittest
+
+import support  # noqa: F401  (puts app/ on the path)
+from backend.config import bowtie2_index_is_complete, get_config, reload_config  # noqa: E402
+from backend.execution.pipeline import PipelineExecutor, stages_by_key  # noqa: E402
+from backend.execution.record import StageStatus  # noqa: E402
+from backend.execution.stage import RunOptions  # noqa: E402
+from backend.project import Project  # noqa: E402
+from backend.samples import ReadLayout  # noqa: E402
+from support import write_fastq  # noqa: E402
+
+
+def qc_environment_available() -> bool:
+    config = reload_config()
+    if not (config.micromamba_binary.is_file() and config.environment_is_installed("qc")):
+        return False
+    return all(
+        (config.environment_prefix("qc") / "bin" / tool).exists()
+        for tool in ("fastqc", "fastp", "multiqc")
+    )
+
+
+QC_STAGES = ("fastqc_raw", "fastp", "fastqc_trimmed", "multiqc")
+
+
+@unittest.skipUnless(
+    qc_environment_available(),
+    "BioFlow's managed quality-control environment is not installed",
+)
+class RealQualityControlTests(unittest.TestCase):
+    """Runs FastQC, fastp and MultiQC for real through BioFlow's micromamba."""
+
+    def setUp(self):
+        self._temporary = tempfile.TemporaryDirectory(prefix="bioflow-real-")
+        self.root = Path(self._temporary.name)
+        self.registry = stages_by_key()
+
+    def tearDown(self):
+        self._temporary.cleanup()
+
+    def _stages(self):
+        return [self.registry[key] for key in QC_STAGES]
+
+    def test_single_end_runs_end_to_end_with_real_tools(self):
+        reads = write_fastq(self.root / "input" / "demo.fastq.gz", records=500)
+        project, problems = Project.from_files(
+            "real-single", self.root / "run", [reads],
+            layout=ReadLayout.SINGLE, options=RunOptions(threads=2),
+        )
+        self.assertEqual(problems, [])
+        self.assertEqual(project.validate_inputs(), [])
+
+        outcome = PipelineExecutor(
+            project.context(), self._stages(), on_log=lambda _m: None
+        ).run(project.samples)
+
+        self.assertTrue(outcome.succeeded, outcome.message)
+        for record in outcome.record.stages:
+            self.assertIs(record.status, StageStatus.COMPLETED, record.message)
+        workspace = project.workspace
+        self.assertTrue(workspace.trimmed_reads(project.samples[0])[0].is_file())
+        self.assertTrue(workspace.multiqc_report().is_file())
+
+    def test_paired_end_runs_end_to_end_and_keeps_mates_separate(self):
+        read1 = write_fastq(self.root / "input" / "demo_R1.fastq.gz", records=500, mate="1")
+        read2 = write_fastq(self.root / "input" / "demo_R2.fastq.gz", records=500, mate="2")
+        project, problems = Project.from_files(
+            "real-paired", self.root / "run", [read1, read2], options=RunOptions(threads=2)
+        )
+        self.assertEqual(problems, [])
+        self.assertIs(project.layout, ReadLayout.PAIRED)
+
+        outcome = PipelineExecutor(
+            project.context(), self._stages(), on_log=lambda _m: None
+        ).run(project.samples)
+
+        self.assertTrue(outcome.succeeded, outcome.message)
+        trimmed = project.workspace.trimmed_reads(project.samples[0])
+        self.assertEqual(len(trimmed), 2)
+        for path in trimmed:
+            self.assertTrue(path.is_file(), path)
+            self.assertGreater(path.stat().st_size, 0)
+
+    def test_resume_skips_completed_stages_on_a_real_rerun(self):
+        reads = write_fastq(self.root / "input" / "demo.fastq.gz", records=200)
+        project, _ = Project.from_files(
+            "real-resume", self.root / "run", [reads],
+            layout=ReadLayout.SINGLE, options=RunOptions(threads=2),
+        )
+        stages = self._stages()
+        self.assertTrue(
+            PipelineExecutor(project.context(), stages, on_log=lambda _m: None)
+            .run(project.samples).succeeded
+        )
+        outcome = PipelineExecutor(
+            project.context(), stages, on_log=lambda _m: None
+        ).run(project.samples)
+        self.assertTrue(outcome.succeeded)
+        for record in outcome.record.stages:
+            self.assertIs(record.status, StageStatus.SKIPPED, record.stage_key)
+
+    def test_a_corrupt_input_makes_a_real_tool_fail_the_pipeline(self):
+        broken = self.root / "input" / "broken.fastq.gz"
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_bytes(b"\x1f\x8b\x08\x00 not a real deflate stream")
+        project, _ = Project.from_files(
+            "real-broken", self.root / "run", [broken], layout=ReadLayout.SINGLE
+        )
+        self.assertTrue(project.validate_inputs(), "the validator should reject this file")
+
+        outcome = PipelineExecutor(
+            project.context(), self._stages(), on_log=lambda _m: None
+        ).run(project.samples)
+        self.assertFalse(outcome.succeeded)
+        self.assertIs(outcome.record.find("fastqc_raw", "broken").status, StageStatus.FAILED)
+        self.assertIs(outcome.record.find("fastp", "broken").status, StageStatus.BLOCKED)
+
+
+@unittest.skipUnless(
+    qc_environment_available(), "BioFlow's managed environment is not installed"
+)
+class RealEnvironmentResolutionTests(unittest.TestCase):
+    def test_commands_resolve_to_bioflows_own_micromamba(self):
+        from backend.execution.environment import EnvironmentResolver
+
+        resolver = EnvironmentResolver(get_config())
+        program, arguments = resolver.resolve("qc", ["fastqc", "--version"])
+        self.assertEqual(program, str(get_config().micromamba_binary))
+        self.assertIn("bioflow-qc", arguments)
+        self.assertNotIn("conda", program)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+@unittest.skipUnless(
+    qc_environment_available(), "BioFlow's managed environment is not installed"
+)
+class RealGuiDrivenRunTests(unittest.TestCase):
+    """Drive a real analysis through the workflow page, as a user would."""
+
+    application = None
+
+    @classmethod
+    def setUpClass(cls):
+        import os
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.application = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._temporary = tempfile.TemporaryDirectory(prefix="bioflow-gui-real-")
+        self.root = Path(self._temporary.name)
+
+    def tearDown(self):
+        self._temporary.cleanup()
+
+    def test_a_paired_end_analysis_runs_from_the_page(self):
+        import time
+
+        from backend.execution.record import PipelineRecord
+        from gui.pages.pipeline_page import PipelinePage
+
+        read1 = write_fastq(self.root / "in" / "demo_R1.fastq.gz", records=300, mate="1")
+        read2 = write_fastq(self.root / "in" / "demo_R2.fastq.gz", records=300, mate="2")
+
+        page = PipelinePage()
+        self.addCleanup(page.shutdown)
+        page.output_directory = self.root / "results"
+        page.selected_files = [read1, read2]
+        page._rebuild_project()
+
+        self.assertIs(page.project.layout, ReadLayout.PAIRED)
+        for key, box in page.stage_boxes.items():
+            box.setChecked(key in QC_STAGES)
+        page.refresh_readiness()
+        self.assertTrue(page.run_button.isEnabled(), page.status_label.text())
+
+        page.start_run()
+        deadline = time.time() + 240
+        while page.is_running and time.time() < deadline:
+            self.application.processEvents()
+            time.sleep(0.05)
+        self.application.processEvents()
+
+        self.assertFalse(page.is_running, "the run did not finish in time")
+        record = PipelineRecord.load(page.project.workspace.checkpoint_file)
+        self.assertIsNotNone(record)
+        self.assertEqual(len(record.stages), len(QC_STAGES))
+        for entry in record.stages:
+            self.assertIs(entry.status, StageStatus.COMPLETED, entry.message)
+        self.assertTrue(page.project.workspace.multiqc_report().is_file())
+
+
+def grch38_available() -> bool:
+    """True when any GRCh38 index resolves - managed, external, or override."""
+    return reload_config().resolve_grch38_index().usable
+
+
+def hostrem_environment_available() -> bool:
+    config = reload_config()
+    return (
+        config.micromamba_binary.is_file()
+        and config.environment_is_installed("hostrem")
+        and (config.environment_prefix("hostrem") / "bin" / "bowtie2").exists()
+    )
+
+
+@unittest.skipUnless(
+    qc_environment_available() and hostrem_environment_available() and grch38_available(),
+    "the managed host-removal environment or a resolvable GRCh38 index is missing",
+)
+class RealHostRemovalTests(unittest.TestCase):
+    """Runs Bowtie2 for real against whichever GRCh38 index BioFlow resolves.
+
+    Deliberately index-agnostic: it works with a managed installation or an
+    explicitly configured external one, so it never depends on one machine's
+    filesystem layout.
+    """
+
+    def setUp(self):
+        self._temporary = tempfile.TemporaryDirectory(prefix="bioflow-hostrem-real-")
+        self.root = Path(self._temporary.name)
+
+    def tearDown(self):
+        self._temporary.cleanup()
+
+    def test_host_removal_uses_the_resolved_index_and_produces_reads(self):
+        from backend.config import get_config
+        from backend.execution.pipeline import PipelineExecutor
+        from backend.execution.stages.host_removal import HostRemovalStage
+
+        config = get_config()
+        resolved = config.resolve_grch38_index()
+
+        reads = write_fastq(self.root / "input" / "hostrem.fastq.gz", records=400)
+        project, _ = Project.from_files(
+            "real-hostrem", self.root / "run", [reads],
+            layout=ReadLayout.SINGLE, options=RunOptions(threads=2),
+        )
+        registry = stages_by_key()
+        stages = [registry[key] for key in ("fastp", "host_removal")]
+
+        # The command must carry exactly the prefix the resolver reported.
+        sample = project.samples[0]
+        command = registry["host_removal"].commands(sample, project.context())[0].command
+        self.assertEqual(command[command.index("-x") + 1], str(resolved.prefix))
+
+        outcome = PipelineExecutor(
+            project.context(), stages, on_log=lambda _m: None
+        ).run(project.samples)
+        self.assertTrue(outcome.succeeded, outcome.message)
+
+        workspace = project.workspace
+        self.assertTrue(workspace.host_removed_reads(sample)[0].is_file())
+        rate = HostRemovalStage.alignment_rate(workspace.bowtie2_log(sample))
+        self.assertIsNotNone(rate, "Bowtie2 did not report an alignment rate")
+
+    def test_running_never_writes_into_the_managed_store_when_external(self):
+        from backend.config import ResourceState, get_config
+
+        config = get_config()
+        resolved = config.resolve_grch38_index()
+        if resolved.state is ResourceState.MANAGED:
+            self.skipTest("the resolved index is the managed one")
+        managed = config.managed_grch38_index_prefix
+        self.assertFalse(
+            bowtie2_index_is_complete(managed),
+            "an external reference must not have populated the managed store",
+        )

@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "BioFlow (desktop app)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/app/main.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false
+        },
+        {
+            "name": "BioFlow setup status (headless)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "backend.setup.cli",
+            "args": [
+                "--status"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/app"
+        }
+    ]
+}

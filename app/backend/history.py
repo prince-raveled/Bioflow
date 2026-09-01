@@ -1,9 +1,11 @@
 """Persistent local run history for BioFlow projects and analysis modules."""
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
-import os
 from pathlib import Path
 import sqlite3
+
+from backend.config import get_config
 
 
 class RunHistory:
@@ -11,14 +13,26 @@ class RunHistory:
 
     @staticmethod
     def database_path() -> Path:
-        configured = os.environ.get("BIOFLOW_HISTORY_DB")
-        if configured:
-            return Path(configured)
-        data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-        return data_home / "bioflow" / "history.sqlite3"
+        """Resolved through the central configuration so it stays relocatable."""
+        return get_config().history_database
 
     @classmethod
-    def _connection(cls) -> sqlite3.Connection:
+    @contextmanager
+    def _connection(cls):
+        """Yield a connection that is committed *and closed*.
+
+        sqlite3's own context manager commits on exit but leaves the connection
+        open, which leaks a handle per run.
+        """
+        connection = cls._open()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
+    @classmethod
+    def _open(cls) -> sqlite3.Connection:
         database = cls.database_path()
         database.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(database)

@@ -3,10 +3,8 @@ from pathlib import Path
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPushButton, QSlider
 
+from backend.samples import FASTQ_FILE_FILTER
 from gui.pages.qc_tool_page import QCToolPage
-
-
-FASTQ_FILTER = "FASTQ files (*.fastq *.fastq.gz *.fq *.fq.gz)"
 
 
 class FastQCPage(QCToolPage):
@@ -43,7 +41,7 @@ class FastQCPage(QCToolPage):
         self.thread_count.setText(f"{value:02d}")
 
     def select_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Select FASTQ files", "", FASTQ_FILTER)
+        files, _ = QFileDialog.getOpenFileNames(self, "Select FASTQ files", "", FASTQ_FILE_FILTER)
         if files:
             self.fastq_files = files
             self.set_default_output_directory(

@@ -1,12 +1,12 @@
 """Host-read removal with Bowtie2 and a configured human reference index."""
 
 from pathlib import Path
-import os
 import re
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QComboBox,
+    QFrame,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -16,7 +16,16 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from gui.pages.fastqc_page import FASTQ_FILTER
+from backend.config import get_config
+from backend.samples import (
+    FASTQ_FILE_FILTER,
+    ReadLayout,
+    detect_samples,
+    sample_name_for,
+)
+from backend.execution.stages.host_removal import gzip_output_argument
+from backend.setup.manager import BOWTIE2_INDEX_PARTS, bowtie2_index_is_complete
+from gui.widgets.status_badge import StatusBadge
 from gui.pages.qc_tool_page import QCToolPage
 
 
@@ -24,9 +33,7 @@ class HostRemovalPage(QCToolPage):
     """Run Bowtie2 against GRCh38 and retain unmapped microbial reads."""
 
     def __init__(self):
-        # This matches the installed BioFlow host-removal environment. Future
-        # setup/configuration work will make the name user-configurable.
-        super().__init__("Host Removal", environment_name="bioflow-hostrem")
+        super().__init__("Host Removal", environment_key="hostrem")
         self.paired_fastq_files: list[str] = []
         self.single_fastq_files: list[str] = []
         self.index_prefix: Path | None = None
@@ -69,12 +76,31 @@ class HostRemovalPage(QCToolPage):
         self.controls.addWidget(self.single_inputs)
         self.single_inputs.hide()
 
+        reference_card = QFrame()
+        reference_card.setObjectName("card")
+        reference_layout = QVBoxLayout(reference_card)
+        reference_layout.setContentsMargins(12, 10, 12, 10)
+        reference_layout.setSpacing(8)
+
+        reference_header = QHBoxLayout()
+        reference_title = QLabel("Human reference (GRCh38)")
+        reference_title.setObjectName("componentTitle")
+        reference_header.addWidget(reference_title)
+        reference_header.addStretch()
+        # States the resolved source plainly: managed, external, or override.
+        self.index_badge = StatusBadge("CHECKING", "idle")
+        reference_header.addWidget(self.index_badge)
+        reference_layout.addLayout(reference_header)
+
         self.index_label = QLabel("GRCh38 Bowtie2 index files: not selected")
+        self.index_label.setObjectName("componentDescription")
         self.index_label.setWordWrap(True)
-        self.controls.addWidget(self.index_label)
+        reference_layout.addWidget(self.index_label)
+
         index_button = QPushButton("Select all 6 GRCh38 index files")
         index_button.clicked.connect(self._select_index_files)
-        self.controls.addWidget(index_button)
+        reference_layout.addWidget(index_button)
+        self.controls.addWidget(reference_card)
         self._load_configured_index()
 
         thread_row = QHBoxLayout()
@@ -99,7 +125,7 @@ class HostRemovalPage(QCToolPage):
 
     def _select_paired_files(self):
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Select all paired-end FASTQ files", "", FASTQ_FILTER
+            self, "Select all paired-end FASTQ files", "", FASTQ_FILE_FILTER
         )
         if not files:
             return
@@ -117,7 +143,7 @@ class HostRemovalPage(QCToolPage):
 
     def _select_single_files(self):
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Select single-end FASTQ files", "", FASTQ_FILTER
+            self, "Select single-end FASTQ files", "", FASTQ_FILE_FILTER
         )
         if not files:
             return
@@ -145,6 +171,7 @@ class HostRemovalPage(QCToolPage):
         prefix = self._find_complete_index([Path(file_name) for file_name in file_names])
         if prefix is None:
             self.index_prefix = None
+            self.index_badge.set_state("INCOMPLETE", "warn")
             self.index_label.setText(
                 "Incomplete index selection. Select all 6 files: "
                 "<prefix>.1/.2/.3/.4/.rev.1/.rev.2.bt2 (or .bt2l)."
@@ -152,24 +179,44 @@ class HostRemovalPage(QCToolPage):
             self.add_log("Select all six matching GRCh38 Bowtie2 index files before running host removal.")
             return
         self.index_prefix = prefix
-        self.index_label.setText(
-            f"GRCh38 index ready (6 files selected and verified): {self.index_prefix}"
-        )
+        self.index_badge.set_state("SELECTED", "info")
+        self.index_badge.setToolTip(f"Chosen for this run: {self.index_prefix}")
+        self.index_label.setText(f"Selected for this run / {self.index_prefix}")
         self.add_log(f"Verified complete GRCh38 Bowtie2 index: {self.index_prefix}")
 
+    #: Badge colour per resolved reference state.
+    REFERENCE_APPEARANCE = {
+        "managed": "ok",
+        "external": "info",
+        "development": "warn",
+        "incomplete": "warn",
+        "missing": "idle",
+    }
+
     def _load_configured_index(self):
-        """Use the reference installed by BioFlow's Linux launcher when present."""
-        configured_prefix = os.environ.get("BIOFLOW_GRCH38_INDEX")
-        if configured_prefix and self._index_prefix_is_complete(Path(configured_prefix)):
-            self.index_prefix = Path(configured_prefix)
+        """Use whichever GRCh38 index BioFlow's resource manager resolves.
+
+        Presentation only: the resolution itself is the resource manager's.
+        """
+        resolved = get_config().resolve_grch38_index()
+        appearance = self.REFERENCE_APPEARANCE.get(resolved.state.value, "idle")
+        self.index_badge.set_state(resolved.state.label.upper(), appearance)
+        if resolved.usable:
+            self.index_prefix = resolved.prefix
+            self.index_badge.setToolTip(resolved.describe())
+            self.index_label.setText(f"{resolved.state.label} / {resolved.prefix}")
+        else:
+            self.index_prefix = None
+            self.index_badge.setToolTip(resolved.state.label)
             self.index_label.setText(
-                f"GRCh38 index ready (BioFlow setup): {self.index_prefix}"
+                f"{resolved.state.label}. Install it from Setup & Resources, "
+                "or select all six index files below."
             )
 
     @staticmethod
     def _find_complete_index(index_files: list[Path]) -> Path | None:
         """Return a prefix only when the user selected all six matching files."""
-        required_parts = ("1", "2", "3", "4", "rev.1", "rev.2")
+        required_parts = BOWTIE2_INDEX_PARTS
         selected_files = set(index_files)
         for extension in ("bt2", "bt2l"):
             for first_part in index_files:
@@ -183,11 +230,8 @@ class HostRemovalPage(QCToolPage):
 
     @staticmethod
     def _index_prefix_is_complete(prefix: Path) -> bool:
-        required_parts = ("1", "2", "3", "4", "rev.1", "rev.2")
-        return any(
-            all(Path(f"{prefix}.{part}.{extension}").is_file() for part in required_parts)
-            for extension in ("bt2", "bt2l")
-        )
+        """Delegates to the resource manager's canonical index check."""
+        return bowtie2_index_is_complete(prefix)
 
     @staticmethod
     def _sample_name(file_name: str) -> str:
@@ -206,30 +250,15 @@ class HostRemovalPage(QCToolPage):
 
     @staticmethod
     def _pair_reads(files: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
-        """Pair common R1/R2 or 1/2 FASTQ naming conventions automatically."""
-        reads: dict[str, dict[str, str]] = {}
-        unmatched: list[str] = []
-        pattern = re.compile(r"(?:[_\.-])(R?[12])(?=[_\.-]|$)", re.IGNORECASE)
-        for file_name in files:
-            stem = Path(file_name).name
-            for extension in (".fastq.gz", ".fq.gz", ".fastq", ".fq"):
-                if stem.lower().endswith(extension):
-                    stem = stem[: -len(extension)]
-                    break
-            match = pattern.search(stem)
-            if not match:
-                unmatched.append(file_name)
-                continue
-            read_number = match.group(1)[-1]
-            key = f"{stem[:match.start()]}{stem[match.end():]}".lower()
-            reads.setdefault(key, {})[read_number] = file_name
+        """Pair R1/R2 files using the canonical detector in backend.samples.
 
-        pairs = []
-        for pair in reads.values():
-            if "1" in pair and "2" in pair:
-                pairs.append((pair["1"], pair["2"]))
-            else:
-                unmatched.extend(pair.values())
+        This page keeps its own thin wrapper only to return plain strings in the
+        shape its batch loop expects; the pairing rules themselves live in one
+        place so this page and the workflow engine can never disagree.
+        """
+        result = detect_samples([Path(name) for name in files], ReadLayout.PAIRED)
+        pairs = [(str(sample.read1), str(sample.read2)) for sample in result.samples]
+        unmatched = [str(path) for path in result.unassigned]
         return pairs, unmatched
 
     def _show_thread_count(self, value: int):
@@ -264,10 +293,15 @@ class HostRemovalPage(QCToolPage):
             sample = self._safe_output_name(self._sample_name(read_1))
             log_file = self.output_directory / f"{sample}_bowtie2.log"
             command = ["bowtie2", "--very-sensitive", "-p", str(self.threads.value()), "-x", str(self.index_prefix)]
+            # The sample token is already sanitised, but the user's chosen output
+            # folder is not, and Bowtie2 passes these paths through its own shell.
             if paired:
-                command.extend(["-1", read_1, "-2", read_2, "--un-conc-gz", str(self.output_directory / f"{sample}_nohost_R%.fastq.gz")])
+                pattern = self.output_directory / f"{sample}_nohost_R%.fastq.gz"
+                command.extend(["-1", read_1, "-2", read_2,
+                                "--un-conc-gz", gzip_output_argument(pattern)])
             else:
-                command.extend(["-U", read_1, "--un-gz", str(self.output_directory / f"{sample}_nohost.fastq.gz")])
+                unmapped = self.output_directory / f"{sample}_nohost.fastq.gz"
+                command.extend(["-U", read_1, "--un-gz", gzip_output_argument(unmapped)])
             command.extend(["-S", "/dev/null"])
             self._pending_jobs.append((sample, command, log_file))
 

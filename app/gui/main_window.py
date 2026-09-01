@@ -1,89 +1,79 @@
-"""BioFlow's quality-control desktop interface."""
+"""BioFlow's desktop interface."""
 
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QStackedWidget, QVBoxLayout, QWidget
+from PyQt6.QtCore import QEasingCurve, QPropertyAnimation
+from PyQt6.QtWidgets import (
+    QFrame,
+    QGraphicsOpacityEffect,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QScrollArea,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
+from backend.setup.manager import SetupManager
+from gui import theme
 from gui.pages.fastp_page import FastPPage
 from gui.pages.fastqc_page import FastQCPage
 from gui.pages.host_removal_page import HostRemovalPage
 from gui.pages.history_page import HistoryPage
 from gui.pages.multiqc_page import MultiQCPage
-from gui.widgets.nucleotide_loom import NucleotideLoom
-from gui.widgets.sidebar import Sidebar
-
-
-VINTAGE_STYLESHEET = """
-QWidget { background: #F5EFE3; color: #2F2924; font-family: Georgia, 'DejaVu Serif', serif; font-size: 14px; }
-QWidget#topBar { background: #995C4A; border: 2px solid #734231; border-radius: 14px; }
-QLabel#brand { background: transparent; color: #FFF9EC; font-size: 30px; font-weight: bold; letter-spacing: 5px; }
-QLabel#brandSub { background: transparent; color: #F8E2C4; font-size: 11px; font-weight: bold; letter-spacing: 3px; }
-QFrame#projectStrip { background: #EEE5D6; border: 1px solid #D8C6A8; border-radius: 9px; }
-QLabel#projectTag { background: transparent; color: #765143; font-size: 11px; font-weight: bold; }
-QLabel#projectValue { background: #FFF9EE; border: 1px solid #D5BD99; border-radius: 7px; color: #667452; font-size: 11px; padding: 5px 9px; }
-QTreeWidget#sidebar { background: #83916B; border: 2px solid #64704F; border-radius: 14px; color: #FAF3E6; font-size: 15px; outline: 0; padding: 15px 9px; }
-QTreeWidget#sidebar::item { background: transparent; border-radius: 7px; min-height: 31px; padding: 3px 7px; }
-QTreeWidget#sidebar::item:hover { background: #A7B18D; color: #2F2924; }
-QTreeWidget#sidebar::item:selected { background: #F1D7AF; color: #673D30; font-weight: bold; }
-QTreeWidget#sidebar::branch { background: transparent; }
-QWidget#toolPage { background: #FFF9EE; border: 2px solid #D8C6A8; border-radius: 14px; }
-QLabel#eyebrow, QLabel#logTitle { color: #73805D; font-size: 11px; font-weight: bold; }
-QLabel#pageTitle { color: #995C4A; font-size: 31px; font-weight: bold; }
-QLabel#pageDescription { color: #62574D; font-size: 15px; }
-QPushButton { background: #E9DDC9; border: 1px solid #C9B38E; border-radius: 8px; color: #43372F; font-weight: bold; padding: 9px 14px; }
-QPushButton:hover { background: #D9C6A7; border-color: #995C4A; }
-QPushButton:disabled { background: #E8E1D5; color: #9B9184; border-color: #D4CABC; }
-QPushButton#runButton { background: #995C4A; border: 2px solid #734231; border-radius: 10px; color: #FFF9EE; font-size: 15px; padding: 12px 18px; }
-QPushButton#runButton:hover { background: #B76D57; }
-QFrame#resultCard { background: #EEF0E4; border: 1px solid #A9B18E; border-radius: 9px; }
-QLabel#resultLabel { background: transparent; color: #596548; font-size: 11px; }
-QPushButton#openResultsButton { background: #83916B; border: 1px solid #64704F; color: #FFF9EE; padding: 5px 10px; }
-QPushButton#openResultsButton:hover { background: #98A57D; }
-QLabel#threadCount { background: #83916B; border: 1px solid #64704F; border-radius: 11px; color: #FFF9EE; font-weight: bold; min-width: 27px; padding: 5px 4px; }
-QSlider::groove:horizontal { background: #D8C6A8; border: 1px solid #C2A57B; border-radius: 5px; height: 8px; }
-QSlider::sub-page:horizontal { background: #83916B; border-radius: 4px; }
-QSlider::handle:horizontal { background: #995C4A; border: 2px solid #734231; border-radius: 10px; margin: -6px 0; width: 18px; }
-QSlider::handle:horizontal:hover { background: #B76D57; }
-QComboBox { background: #FFF9EE; border: 1px solid #C9B38E; border-radius: 7px; min-height: 27px; padding: 2px 8px; }
-QComboBox::drop-down { border: 0; width: 24px; }
-QComboBox QAbstractItemView { background: #FFF9EE; border: 1px solid #C9B38E; selection-background-color: #E9DDC9; }
-QScrollArea { border: 0; background: transparent; }
-QTreeWidget#historyTable { background: #FFF9EE; border: 1px solid #D8C6A8; border-radius: 8px; alternate-background-color: #F5EFE3; }
-QTreeWidget#historyTable::item { min-height: 30px; padding: 3px; }
-QTreeWidget#historyTable::item:selected { background: #E9DDC9; color: #43372F; }
-QTextEdit#executionLog { background: #2F2924; border: 3px solid #83916B; border-radius: 9px; color: #F7EAD3; font-family: 'DejaVu Sans Mono', monospace; font-size: 12px; padding: 8px; }
-QScrollBar:vertical { background: #E9DDC9; width: 11px; margin: 3px; }
-QScrollBar::handle:vertical { background: #995C4A; border-radius: 5px; min-height: 24px; }
-"""
+from gui.pages.pipeline_page import PipelinePage
+from gui.pages.setup_page import SetupPage
+from gui.widgets.sidebar import SidebarPanel
+from gui.widgets.status_badge import StatusBadge
+from gui.widgets.video_backdrop import BackgroundVideo
 
 
 class MainWindow(QWidget):
-    """Show quality-control tools in a warm, vintage-inspired workbench."""
+    """The BioFlow workbench: navigation, backend status, and every page."""
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BioFlow — Metagenomics")
-        self.resize(1060, 690)
-        self.setStyleSheet(VINTAGE_STYLESHEET)
+        self.resize(1180, 760)
+        self.setMinimumSize(880, 560)
+        self.setStyleSheet(theme.STYLESHEET)
+
+        # The animated background is a child of the window itself, kept behind
+        # every other widget and resized with it. It is transparent to input.
+        self.background = BackgroundVideo(parent=self)
+        self.background.ready.connect(self._note_background)
+        self.background.lower()
+        self.background_playing = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 20, 22, 22)
         root.setSpacing(16)
         root.addWidget(self._make_header())
-        root.addWidget(self._make_project_strip())
+        root.addWidget(self._make_status_strip())
 
         content = QHBoxLayout()
         content.setSpacing(16)
-        self.sidebar = Sidebar()
-        self.sidebar.setMinimumWidth(210)
-        self.sidebar.setMaximumWidth(230)
+        self.sidebar_panel = SidebarPanel()
+        self.sidebar_panel.setMinimumWidth(212)
+        self.sidebar_panel.setMaximumWidth(236)
+        self.sidebar = self.sidebar_panel.tree
         self.sidebar.itemClicked.connect(self.show_page)
-        content.addWidget(self.sidebar)
+        content.addWidget(self.sidebar_panel)
 
         self.pages = QStackedWidget()
+        setup_page = SetupPage()
+        host_removal_page = HostRemovalPage()
+        # A finished install makes new tools and references available immediately.
+        setup_page.setup_changed.connect(host_removal_page._load_configured_index)
+        pipeline_page = PipelinePage()
+        setup_page.setup_changed.connect(pipeline_page.refresh_readiness)
+        setup_page.setup_changed.connect(self.refresh_status_strip)
         self.page_by_name = {
+            "Setup & Resources": setup_page,
+            "Run workflow": pipeline_page,
             "FastQC": FastQCPage(),
             "fastp": FastPPage(),
             "MultiQC": MultiQCPage(),
-            "Host Removal": HostRemovalPage(),
+            "Host Removal": host_removal_page,
             "Run History": HistoryPage(),
         }
         self.page_containers = {}
@@ -95,46 +85,192 @@ class MainWindow(QWidget):
             self.pages.addWidget(container)
         content.addWidget(self.pages, 1)
         root.addLayout(content, 1)
+        self._open_starting_page()
+        self.refresh_status_strip()
+        self.background.setGeometry(self.rect())
+        self.background.lower()
 
-    @staticmethod
-    def _make_header() -> QWidget:
+    def _open_starting_page(self):
+        """Start on Setup until the core quality-control backend is installed."""
+        manager = SetupManager()
+        first_page = (
+            "Run workflow"
+            if manager.micromamba_installed() and manager.environment_installed("qc")
+            else "Setup & Resources"
+        )
+        self.sidebar.select(first_page)
+        self.pages.setCurrentWidget(self.page_containers[first_page])
+
+    def _make_header(self) -> QWidget:
+        """Brand, workflow summary, and the looping DNA visual."""
         header = QFrame()
-        header.setObjectName("topBar")
+        header.setObjectName("appHeader")
+        header.setFixedHeight(96)
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(24, 15, 24, 15)
+        layout.setContentsMargins(22, 14, 14, 14)
+        layout.setSpacing(18)
+
         text = QVBoxLayout()
-        brand = QLabel("BIOFLOW")
-        brand.setObjectName("brand")
-        text.addWidget(brand)
-        sub_brand = QLabel("METAGENOMICS")
-        sub_brand.setObjectName("brandSub")
-        text.addWidget(sub_brand)
+        text.setSpacing(2)
+        wordmark = QHBoxLayout()
+        wordmark.setSpacing(0)
+        bio = QLabel("Bio")
+        bio.setObjectName("brandMark")
+        wordmark.addWidget(bio)
+        flow = QLabel("Flow")
+        flow.setObjectName("brandFlow")
+        wordmark.addWidget(flow)
+        wordmark.addStretch()
+        text.addLayout(wordmark)
+        tagline = QLabel("METAGENOMIC ANALYSIS WORKBENCH")
+        tagline.setObjectName("brandTag")
+        text.addWidget(tagline)
         layout.addLayout(text)
+
         layout.addStretch()
-        layout.addWidget(NucleotideLoom())
+        layout.addWidget(self._make_pipeline_summary())
         return header
 
-    @staticmethod
-    def _make_project_strip() -> QWidget:
+    def _make_pipeline_summary(self) -> QWidget:
+        """A compact reminder of the workflow this application runs."""
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"background: rgba(115, 66, 49, 0.55);"
+            f" border: 1px solid {theme.ACCENT_DEEP}; border-radius: 9px;"
+        )
+        row = QHBoxLayout(frame)
+        row.setContentsMargins(14, 8, 14, 8)
+        row.setSpacing(10)
+        for index, name in enumerate(("QC", "Trim", "Host", "Taxa", "Function", "Report")):
+            if index:
+                arrow = QLabel("›")
+                arrow.setStyleSheet(
+                    f"background: transparent; color: #E4C9A6; font-size: 13px;"
+                )
+                row.addWidget(arrow)
+            step = QLabel(name)
+            step.setStyleSheet(
+                f"background: transparent; color: {theme.CREAM_TEXT};"
+                f" font-size: 11px; font-weight: bold; letter-spacing: 1px;"
+            )
+            row.addWidget(step)
+        return frame
+
+    def _note_background(self, playing: bool) -> None:
+        """Record whether the animated background is running, for diagnostics."""
+        self.background_playing = playing
+
+    def resizeEvent(self, event):
+        """Keep the background covering the whole window at any size."""
+        super().resizeEvent(event)
+        if getattr(self, "background", None) is not None:
+            self.background.setGeometry(self.rect())
+            self.background.lower()
+
+    def _make_status_strip(self) -> QWidget:
+        """A live, at-a-glance summary of what the backend can currently do."""
         strip = QFrame()
-        strip.setObjectName("projectStrip")
+        strip.setObjectName("card")
         layout = QHBoxLayout(strip)
-        layout.setContentsMargins(14, 7, 14, 7)
-        layout.setSpacing(9)
-        tag = QLabel("Workflow")
-        tag.setObjectName("projectTag")
-        layout.addWidget(tag)
-        for text in ("FASTQ → QC → Host removal", "Local analysis"):
-            value = QLabel(text)
-            value.setObjectName("projectValue")
-            layout.addWidget(value)
-        layout.addStretch()
+        layout.setContentsMargins(16, 9, 16, 9)
+        layout.setSpacing(16)
+
+        self.readiness_badge = StatusBadge("CHECKING", "idle")
+        layout.addWidget(self.readiness_badge)
+        self.readiness_label = QLabel("Checking installed backends...")
+        self.readiness_label.setObjectName("resultLabel")
+        layout.addWidget(self.readiness_label, 1)
+
+        self.reference_badge = StatusBadge("GRCh38", "idle")
+        layout.addWidget(self.reference_badge)
         return strip
+
+    def refresh_status_strip(self) -> None:
+        """Re-read backend state. Cheap: filesystem checks only, no subprocesses."""
+        manager = SetupManager()
+        components = manager.components()
+        environments = [c for c in components if c.kind == "environment"]
+        ready = [c for c in environments if c.installed]
+
+        if not manager.micromamba_installed():
+            self.readiness_badge.set_state("SETUP NEEDED", "warn")
+            self.readiness_label.setText(
+                "No analysis backend installed yet — open Setup & Resources to begin."
+            )
+        elif len(ready) == len(environments):
+            self.readiness_badge.set_state("READY", "ok")
+            self.readiness_label.setText(
+                f"All {len(environments)} analysis environments installed."
+            )
+        else:
+            self.readiness_badge.set_state("PARTIAL", "info")
+            self.readiness_label.setText(
+                f"{len(ready)} of {len(environments)} analysis environments installed: "
+                + ", ".join(c.title.replace(" tools", "") for c in ready)
+            )
+
+        reference = [c for c in components if c.key == "db:grch38"][0]
+        kind = {"managed": "ok", "external": "info", "development": "warn"}.get(
+            reference.state.value, "idle"
+        )
+        self.reference_badge.set_state(f"GRCh38 · {reference.state.label.upper()}", kind)
+        self.reference_badge.setToolTip(reference.describe_state())
+
+    def closeEvent(self, event):
+        """Confirm before abandoning a running install, then stop it cleanly."""
+        pipeline_page = self.page_by_name["Run workflow"]
+        if pipeline_page.is_running:
+            answer = QMessageBox.question(
+                self,
+                "An analysis is still running",
+                "BioFlow is still running the workflow. Closing now stops it.\n\n"
+                "Completed stages are recorded, so you can resume later from "
+                "Run workflow.\n\nClose anyway?",
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Close,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Close:
+                event.ignore()
+                return
+        setup_page = self.page_by_name["Setup & Resources"]
+        if setup_page.is_running:
+            answer = QMessageBox.question(
+                self,
+                "Setup is still running",
+                "BioFlow is still installing backends. Closing now stops the "
+                "install.\n\nAlready-downloaded packages are kept, so you can "
+                "resume later from Setup & Resources.\n\nClose anyway?",
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Close,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Close:
+                event.ignore()
+                return
+        pipeline_page.shutdown()
+        setup_page.shutdown()
+        if getattr(self, "background", None) is not None:
+            self.background.stop()
+        event.accept()
 
     def show_page(self, item, _column):
         container = self.page_containers.get(item.text(0))
         if container:
-            self.pages.setCurrentWidget(container)
+            self._fade_to(container)
             page = self.page_by_name[item.text(0)]
             if isinstance(page, HistoryPage):
                 page.refresh()
+            self.refresh_status_strip()
+
+    def _fade_to(self, container) -> None:
+        """Cross-fade to a page. Purely visual; nothing waits on it."""
+        self.pages.setCurrentWidget(container)
+        effect = QGraphicsOpacityEffect(container)
+        container.setGraphicsEffect(effect)
+        animation = QPropertyAnimation(effect, b"opacity", self)
+        animation.setDuration(160)
+        animation.setStartValue(0.35)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # Drop the effect afterwards so it never costs anything at rest.
+        animation.finished.connect(lambda: container.setGraphicsEffect(None))
+        animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)

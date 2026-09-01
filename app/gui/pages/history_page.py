@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from PyQt6.QtCore import QUrl, Qt
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtGui import QBrush, QColor, QDesktopServices
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 )
 
 from backend.history import RunHistory
+from gui import theme
 
 
 class HistoryPage(QWidget):
@@ -53,6 +54,10 @@ class HistoryPage(QWidget):
         actions.addStretch()
         layout.addLayout(actions)
 
+        self.summary = QLabel("")
+        self.summary.setObjectName("componentDescription")
+        layout.addWidget(self.summary)
+
         self.table = QTreeWidget()
         self.table.setObjectName("historyTable")
         self.table.setHeaderLabels(["When", "Module", "Status", "Input", "Output"])
@@ -66,18 +71,39 @@ class HistoryPage(QWidget):
         layout.addWidget(self.table, 1)
         self.refresh()
 
+    #: Colour each run status so a long history can be scanned at a glance.
+    STATUS_COLOURS = {
+        "completed": theme.OK,
+        "failed": theme.ERROR,
+        "running": theme.ACCENT,
+        "blocked": theme.WARN,
+        "skipped": theme.INFO,
+    }
+
     def refresh(self):
         self.table.clear()
-        for run in RunHistory.recent_runs():
+        runs = RunHistory.recent_runs()
+        for run in runs:
+            status = (run["status"] or "").lower()
             item = QTreeWidgetItem([
                 run["started_at"],
                 run["tool_name"],
-                run["status"].title(),
+                status.title(),
                 run["input_summary"] or "—",
                 run["output_directory"] or "—",
             ])
+            colour = self.STATUS_COLOURS.get(status)
+            if colour:
+                item.setForeground(2, QBrush(QColor(colour)))
+                font = item.font(2)
+                font.setBold(True)
+                item.setFont(2, font)
             item.setData(0, Qt.ItemDataRole.UserRole, run)
             self.table.addTopLevelItem(item)
+        self.summary.setText(
+            f"{len(runs)} run(s) recorded"
+            + (f"  ·  most recent: {runs[0]['started_at']}" if runs else "")
+        )
         self._update_action_state()
 
     def _selected_run(self) -> dict | None:
