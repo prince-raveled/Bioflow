@@ -27,6 +27,13 @@ DEFAULT_ENVIRONMENT_NAMES: dict[str, str] = {
 #: MetaPhlAn marker-gene database released January 2025.
 METAPHLAN_INDEX = "mpa_vJan25_CHOCOPhlAnSGB_202503"
 
+#: Backends analysis commands can run through. Native first because it is the
+#: default and the one that needs nothing installed beyond BioFlow itself.
+EXECUTION_BACKENDS = ("native", "container")
+
+#: The analysis image used when the container backend is selected.
+DEFAULT_CONTAINER_IMAGE = "localhost/bioflow-tools:0.1.0"
+
 #: Environment variable reserved for development and automated tests only.
 #: It never changes an installation target and never makes a resource report as
 #: managed. See resolve_grch38_index().
@@ -158,6 +165,16 @@ class BioFlowConfig:
     )
     #: Explicitly configured external references, persisted in config.json.
     external_grch38_index: Path | None = None
+    #: Which backend runs analysis commands: "native" or "container".
+    #:
+    #: Native is the default and stays the default. It needs nothing beyond
+    #: what BioFlow installs for itself, which is the whole point of the
+    #: managed Micromamba runtime; container execution adds a dependency on a
+    #: runtime being present, and exists for reproducibility rather than to
+    #: replace the desktop path.
+    execution_backend: str = "native"
+    #: The analysis image, when the container backend is selected.
+    container_image: str = DEFAULT_CONTAINER_IMAGE
 
     # ------------------------------------------------------------------
     # Runtime locations
@@ -352,12 +369,28 @@ class BioFlowConfig:
                 external_index = Path(str(stored)).expanduser()
 
         threads = settings.get("default_threads")
+
+        execution = settings.get("execution")
+        backend, image = "native", DEFAULT_CONTAINER_IMAGE
+        if isinstance(execution, dict):
+            saved_backend = execution.get("backend")
+            # An unrecognised value falls back to native rather than refusing to
+            # start: a configuration written by a newer build must never leave
+            # someone unable to run anything.
+            if saved_backend in EXECUTION_BACKENDS:
+                backend = saved_backend
+            saved_image = execution.get("container_image")
+            if saved_image:
+                image = str(saved_image)
+
         return cls(
             data_root=data_root,
             database_root=database_root,
             default_threads=int(threads) if isinstance(threads, int) and threads > 0 else 4,
             environment_names=environment_names,
             external_grch38_index=external_index,
+            execution_backend=backend,
+            container_image=image,
         )
 
     def as_dict(self) -> dict:
@@ -371,6 +404,10 @@ class BioFlowConfig:
                 "grch38_index_prefix": (
                     str(self.external_grch38_index) if self.external_grch38_index else None
                 )
+            },
+            "execution": {
+                "backend": self.execution_backend,
+                "container_image": self.container_image,
             },
         }
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 
 from backend.config import METAPHLAN_INDEX, BioFlowConfig, get_config
+from backend.execution.backends import backend_for, execution_image_reference
 from backend.resources import memory_limit_bytes
 from backend.execution.stage import RunContext, RunOptions
 from backend.execution.workspace import Workspace
@@ -49,6 +50,15 @@ class Project:
             # ceiling. The value decides part of MetaPhlAn's command line and
             # so part of the checkpoint fingerprint.
             memory_limit_bytes=memory_limit_bytes(),
+            # Resolved once, here, for the same reason as the memory ceiling:
+            # a run must not change backend part-way through, and the image
+            # reference is part of what distinguishes one result from another.
+            execution_backend=backend_for(config=resolved),
+            execution_image=(
+                execution_image_reference(resolved)
+                if backend_for(config=resolved) == "container"
+                else ""
+            ),
         )
 
     # ------------------------------------------------------------------

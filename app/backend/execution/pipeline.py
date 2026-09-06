@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import threading
 
+from backend.execution.backends import resolver_for
 from backend.execution.environment import EnvironmentResolver, MissingBackend
 from backend.execution.record import (
     PipelineRecord,
@@ -99,7 +100,14 @@ class PipelineExecutor:
     ):
         self.context = context
         self.stages = stages if stages is not None else default_stages()
-        self.resolver = resolver or EnvironmentResolver()
+        # The backend the context was built with, not whatever the setting says
+        # now: a run must finish in the environment it started in, and a
+        # preference changed mid-analysis must not split one result across two.
+        # An explicitly supplied resolver still wins, which is what the tests
+        # and the standalone pages rely on.
+        self.resolver = resolver or resolver_for(
+            context, cidfile_directory=context.workspace.root / ".bioflow-containers"
+        )
         self.cancel_event = cancel_event or threading.Event()
         self.runner = CommandRunner(self.resolver, self.cancel_event)
         self._on_log = on_log
