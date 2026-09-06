@@ -7,6 +7,7 @@ from pathlib import Path
 import gzip
 import os
 import shutil
+import zlib
 
 from backend.execution.record import ValidationResult
 from backend.execution.workspace import Workspace
@@ -35,6 +36,11 @@ class RunOptions:
     """User-adjustable execution settings for one analysis."""
 
     threads: int = 4
+    #: Profile only this many read pairs, or None to use every read.
+    #:
+    #: MetaPhlAn's paired subsampling is a speed control, not a quality one: it
+    #: throws reads away. Left unset, the whole sample is profiled.
+    metaphlan_subsample_pairs: int | None = None
     #: HUMAnN's protein-only mode; the documented path for non-HPC hardware.
     humann_protein_only: bool = True
     #: Normalise HUMAnN tables to copies per million after profiling.
@@ -52,6 +58,13 @@ class RunContext:
     #: MetaPhlAn database directory and index name.
     metaphlan_database: Path | None = None
     metaphlan_index: str = ""
+    #: Where the Bowtie2 shim lives, and what it needs to activate the
+    #: environment. All resolved from configuration, so nothing here depends on
+    #: where BioFlow was installed.
+    bowtie2_memory_mapped_shim: Path | None = None
+    micromamba_binary: Path | None = None
+    micromamba_root: Path | None = None
+    taxonomy_environment: str = ""
 
     @property
     def threads(self) -> str:
@@ -63,6 +76,17 @@ class Stage(ABC):
 
     key: str = ""
     title: str = ""
+    #: One word for the workflow strip in the header. Several stages can share
+    #: one - both FastQC passes are "QC" - and repeats collapse when the strip
+    #: is built, so it reads as the shape of the workflow rather than a list.
+    short_title: str = ""
+    #: Label for this stage's chip in the pipeline row, where every stage is
+    #: shown separately and naming the tool is more use than naming the step.
+    #: A second vocabulary on purpose, but owned here rather than in the widget:
+    #: a map keyed by stage key in the interface is free to drift from the
+    #: stages that actually exist, which is how the header came to advertise a
+    #: stage the release had withheld.
+    chip_title: str = ""
     environment_key: str = ""
     #: Setup database keys this stage cannot run without.
     required_databases: tuple[str, ...] = ()
@@ -118,15 +142,41 @@ def check_exists(result: ValidationResult, path: Path, minimum_bytes: int = 1) -
     return True
 
 
+#: Read size for verifying a compressed output. Large enough that decompressing
+#: a multi-gigabyte FASTQ is bounded by throughput rather than syscalls.
+_VERIFY_CHUNK = 4 * 1024 * 1024
+
+
 def check_gzip_readable(result: ValidationResult, path: Path) -> bool:
-    """Assert a gzip file can actually be decompressed, catching truncation."""
+    """Assert a gzip file decompresses completely and its checksum matches.
+
+    The whole stream is read, not a sample of it. Reading only the first
+    kilobyte accepted a file truncated anywhere after it, which is exactly the
+    shape a stage interrupted part-way through writing leaves behind: the file
+    exists, it is large, its first block decompresses, and the reads after the
+    cut are simply gone. The stage was then recorded as complete and a resume
+    trusted it, so an analysis could run to a confident finish on a fraction of
+    the data with nothing anywhere reporting a problem.
+
+    Reading to the end also makes the gzip module verify the trailing CRC and
+    length, so corruption in the middle is caught as well as truncation.
+    """
+    read = 0
     try:
         with gzip.open(path, "rb") as handle:
-            handle.read(1024)
-    except (OSError, EOFError) as error:
-        result.add(f"{path.name} is readable", False, str(error))
+            while chunk := handle.read(_VERIFY_CHUNK):
+                read += len(chunk)
+    except (OSError, EOFError, zlib.error) as error:
+        result.add(
+            f"{path.name} is complete and readable",
+            False,
+            f"{error} (after {read} decompressed bytes)",
+        )
         return False
-    result.add(f"{path.name} is readable", True)
+    if read == 0:
+        result.add(f"{path.name} is complete and readable", False, "decompressed to nothing")
+        return False
+    result.add(f"{path.name} is complete and readable", True, f"{read} bytes of reads")
     return True
 
 

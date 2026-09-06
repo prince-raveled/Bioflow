@@ -8,6 +8,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
+import support  # noqa: E402  (shared test helpers)
+
 from backend.config import BioFlowConfig, DEFAULT_ENVIRONMENT_NAMES  # noqa: E402
 from backend.setup.manager import SetupManager  # noqa: E402
 from backend.setup.plan import ActionStep, CommandStep  # noqa: E402
@@ -43,9 +45,17 @@ class SetupManagerTests(unittest.TestCase):
         self.assertTrue(all(not item.installed for item in self.manager.components()))
 
     def test_every_registry_entry_appears_once(self):
+        support.enable_functional_profiling(self)
         keys = [component.key for component in self.manager.components()]
         self.assertEqual(len(keys), len(set(keys)))
         self.assertEqual(len(keys), 1 + len(ENVIRONMENTS) + len(DATABASES))
+
+    def test_the_release_withholds_functional_profiling(self):
+        # Held back, not removed - the registry still defines all of it.
+        keys = [component.key for component in self.manager.components()]
+        for withheld in ("env:function", "db:humann_chocophlan", "db:humann_uniref50"):
+            self.assertNotIn(withheld, keys)
+        self.assertIn("db:metaphlan_chocophlan", keys, "taxonomy is in scope")
 
     def test_micromamba_is_detected_once_it_is_executable(self):
         binary = self.manager.config.micromamba_binary
@@ -56,7 +66,7 @@ class SetupManagerTests(unittest.TestCase):
 
     def test_environment_is_detected_from_its_bin_directory(self):
         self.assertFalse(self.manager.environment_installed("qc"))
-        (self.manager.config.environment_prefix("qc") / "bin").mkdir(parents=True)
+        support.install_fake_environment(self.manager.config, "qc")
         self.assertTrue(self.manager.environment_installed("qc"))
 
     def test_database_is_detected_from_its_marker_files(self):
@@ -65,7 +75,12 @@ class SetupManagerTests(unittest.TestCase):
         self.assertFalse(self.manager.database_installed(metaphlan))
         directory = self.manager.database_directory(metaphlan)
         directory.mkdir(parents=True)
+        # The marker table alone is not an installation: MetaPhlAn cannot align
+        # without the Bowtie2 index that arrives in the same download.
         (directory / "mpa_vJan25_CHOCOPhlAnSGB_202503.pkl").write_text("", encoding="utf-8")
+        self.assertFalse(self.manager.database_installed(metaphlan))
+        for pattern in metaphlan.required_globs:
+            (directory / pattern).write_text("", encoding="utf-8")
         self.assertTrue(self.manager.database_installed(metaphlan))
 
     def test_a_complete_grch38_index_is_detected(self):
@@ -108,7 +123,7 @@ class SetupManagerTests(unittest.TestCase):
         self.assertTrue(any("Bowtie2 index" in title for title in titles))
 
     def test_an_already_installed_environment_is_not_reinstalled(self):
-        (self.manager.config.environment_prefix("hostrem") / "bin").mkdir(parents=True)
+        support.install_fake_environment(self.manager.config, "hostrem")
         plan = self.manager.build_plan(["db:grch38"])
         self.assertFalse(
             any("host removal environment" in step.title for step in plan.steps)
@@ -139,17 +154,54 @@ class SetupManagerTests(unittest.TestCase):
                     self.assertIsInstance(step, (CommandStep, ActionStep))
 
     def test_environment_commands_run_inside_bioflow_not_system_conda(self):
+        """Every micromamba call must be pinned to BioFlow's own root prefix.
+
+        Most subcommands take -r. `clean` does not accept it and reads the root
+        only from MAMBA_ROOT_PREFIX, so the invariant is that the root is pinned
+        by one mechanism or the other -- never left to whatever conda
+        installation happens to be on the machine.
+        """
         plan = self.manager.build_plan(["env:qc"])
         commands = [step for step in plan.steps if isinstance(step, CommandStep)]
         self.assertTrue(commands)
+        root = str(self.manager.config.micromamba_root)
         for step in commands:
-            self.assertEqual(step.program, str(self.manager.config.micromamba_binary))
-            self.assertIn("-r", step.arguments)
-            self.assertIn(str(self.manager.config.micromamba_root), step.arguments)
+            with self.subTest(step=step.title):
+                self.assertEqual(step.program, str(self.manager.config.micromamba_binary))
+                pinned_by_flag = "-r" in step.arguments and root in step.arguments
+                pinned_by_environment = (step.environment or {}).get("MAMBA_ROOT_PREFIX") == root
+                self.assertTrue(
+                    pinned_by_flag or pinned_by_environment,
+                    f"{step.title!r} does not pin the micromamba root",
+                )
+
+    def test_the_cache_cleanup_is_pinned_to_bioflows_root(self):
+        # It cannot use -r, so the environment overlay is the only guard against
+        # it emptying a package cache that belongs to something else.
+        plan = self.manager.build_plan(["env:qc"])
+        cleanup = [
+            step for step in plan.steps
+            if isinstance(step, CommandStep) and "clean" in step.arguments
+        ]
+        self.assertEqual(len(cleanup), 1)
+        step = cleanup[0]
+        self.assertEqual(
+            step.environment, {"MAMBA_ROOT_PREFIX": str(self.manager.config.micromamba_root)}
+        )
+        self.assertNotIn("--force-pkgs-dirs", step.arguments,
+                         "that flag empties every writable cache, not just ours")
+        self.assertTrue(step.tolerate_failure, "housekeeping must not fail a good install")
+
+    def test_the_cleanup_runs_after_the_work_that_needs_the_cache(self):
+        # A retry of an earlier step reuses cached packages; clearing the cache
+        # before the plan finishes would make every retry a fresh download.
+        plan = self.manager.build_plan(["env:qc"])
+        titles = [step.title for step in plan.steps]
+        self.assertEqual(titles[-1], "Reclaim disk space from the package cache")
 
     def test_estimated_size_ignores_installed_components(self):
         before = self.manager.estimated_bytes(["env:qc"])
-        (self.manager.config.environment_prefix("qc") / "bin").mkdir(parents=True)
+        support.install_fake_environment(self.manager.config, "qc")
         self.assertGreater(before, 0)
         self.assertEqual(self.manager.estimated_bytes(["env:qc"]), 0)
 

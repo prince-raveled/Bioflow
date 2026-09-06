@@ -12,6 +12,7 @@ import unittest
 from support import (  # noqa: E402
     clear_bioflow_environment,
     failing_tool,
+    install_fake_environment,
     install_fake_micromamba,
     install_fake_tool,
     make_config,
@@ -79,6 +80,11 @@ class PipelineTestCase(unittest.TestCase):
         self.root = Path(self._temporary.name)
         self.config = make_config(self.root / "backend")
         install_fake_micromamba(self.config)
+        # The qc environment must look genuinely complete, not merely present:
+        # BioFlow treats an environment holding a `bin` directory without its
+        # declared tools as an interrupted installation, which is what these
+        # tests would otherwise be describing.
+        install_fake_environment(self.config, "qc")
         install_fake_tool(self.config, "qc", "writer", WRITER)
 
         self.workspace = Workspace(self.root / "project")

@@ -9,6 +9,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
+import support  # noqa: E402  (shared test helpers)
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
@@ -54,8 +56,13 @@ class SetupPageTests(unittest.TestCase):
         binary.chmod(0o755)
 
     def test_page_builds_on_a_fresh_machine(self):
+        from backend.setup.manager import SetupManager
+
         page = self._build_page()
-        self.assertEqual(len(page.rows), 9)
+        # Derived rather than pinned: the page shows what the release offers, so
+        # a hard-coded count only records what the release happened to be.
+        self.assertEqual(len(page.rows), len(SetupManager(page.config).components()))
+        self.assertNotIn("env:function", page.rows, "withheld from this release")
         self.assertEqual(page.rows["micromamba"].status_label.text(), "Not installed")
         self.assertTrue(page.selected_keys())
 
@@ -68,7 +75,9 @@ class SetupPageTests(unittest.TestCase):
         self.assertNotIn("micromamba", page.selected_keys())
 
     def test_installed_components_cannot_be_reselected(self):
-        (self.root / "micromamba-root" / "envs" / "bioflow-qc" / "bin").mkdir(parents=True)
+        from backend.config import reload_config
+
+        support.install_fake_environment(reload_config(), "qc")
         page = self._build_page()
         self.assertEqual(page.rows["env:qc"].status_label.text(), "Managed")
         self.assertFalse(page.rows["env:qc"].checkbox.isEnabled())

@@ -87,12 +87,17 @@ class PipelinePageTests(unittest.TestCase):
         self.assertFalse(self.page.run_button.isEnabled())
         self.assertIn("Input problems", self.page.status_label.text())
 
-    def test_missing_backends_block_the_run_and_are_named(self):
+    def test_missing_backends_block_the_run_and_say_where_to_fix_it(self):
         reads = write_fastq(self.root / "in" / "demo.fastq.gz")
         self._select(reads)
         # Every stage is selected by default, including ones needing databases.
         self.assertFalse(self.page.run_button.isEnabled())
-        self.assertIn("not installed", self.page.status_label.text())
+        message = self.page.status_label.text()
+        # The wording is free to change; pointing at the remedy is not. Naming
+        # the components alone left a first run looking broken rather than
+        # unconfigured.
+        self.assertIn("Setup & Resources", message)
+        self.assertIn("install", message.lower())
 
     def test_deselecting_every_stage_is_refused(self):
         reads = write_fastq(self.root / "in" / "demo.fastq.gz")
@@ -192,3 +197,199 @@ class PipelinePageIsolationTests(unittest.TestCase):
 
     def test_environment_variable_points_at_the_temporary_directory(self):
         self.assertEqual(os.environ["BIOFLOW_DATA_DIR"], str(self.data_root))
+
+
+@unittest.skipIf(QApplication is None, "PyQt6 is not installed")
+class StageSelectionDefaultsTests(unittest.TestCase):
+    """A stage the machine cannot run must not block the stages it can.
+
+    Requirements are checked across the whole selection, so one ticked stage
+    with a missing backend disables the run button for every other stage. With
+    functional profiling left out of this release, ticking it by default meant
+    a fully installed taxonomic pipeline refused to start.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.application = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from backend.config import get_config
+        import support
+
+        isolate_bioflow_data_directory(self)
+        # Functional profiling is the stage this release withholds, and the one
+        # whose absent environment caused the blocking behaviour under test, so
+        # it is enabled here to keep exercising that path.
+        support.enable_functional_profiling(self)
+        self.config = get_config()
+
+    def _page(self):
+        from gui.pages.pipeline_page import PipelinePage
+
+        return PipelinePage()
+
+    def test_a_stage_without_its_environment_starts_unticked(self):
+        # Nothing is installed in an isolated data directory, but the fallback
+        # only applies when *no* stage is installed, so install one.
+        import support
+
+        support.install_fake_environment(self.config, "qc")
+        page = self._page()
+        self.assertTrue(page.stage_boxes["fastqc_raw"].isChecked())
+        self.assertFalse(
+            page.stage_boxes["humann"].isChecked(),
+            "a stage whose environment is absent would block the whole run",
+        )
+
+    def test_an_unticked_stage_explains_itself(self):
+        import support
+
+        support.install_fake_environment(self.config, "qc")
+        page = self._page()
+        tooltip = page.stage_boxes["humann"].toolTip()
+        self.assertIn("not installed", tooltip)
+        self.assertIn("Setup", tooltip)
+
+    def test_a_bare_machine_still_shows_the_whole_workflow(self):
+        # With nothing installed there is no useful subset to offer; ticking
+        # everything keeps the intended pipeline visible and lets the readiness
+        # line send the user to Setup.
+        page = self._page()
+        self.assertTrue(all(box.isChecked() for box in page.stage_boxes.values()))
+
+    def test_installing_a_stage_later_ticks_it(self):
+        import support
+
+        support.install_fake_environment(self.config, "qc")
+        self.assertFalse(self._page().stage_boxes["humann"].isChecked())
+        support.install_fake_environment(self.config, "function")
+        self.assertTrue(
+            self._page().stage_boxes["humann"].isChecked(),
+            "the default must follow what is installed, not a hard-coded release list",
+        )
+
+
+@unittest.skipIf(QApplication is None, "PyQt6 is not installed")
+class MissingBackendMessageTests(unittest.TestCase):
+    """What the page says when a run cannot start yet.
+
+    Enumerating every absent component made a first run look broken rather than
+    unconfigured: on a bare machine the list is the whole catalogue, rendered as
+    one unbroken line under a greyed-out button.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.application = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from backend.config import get_config
+
+        isolate_bioflow_data_directory(self)
+        self.config = get_config()
+
+    def _page_with_input(self):
+        from gui.pages.pipeline_page import PipelinePage
+
+        page = PipelinePage()
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        reads = write_fastq(root / "sample.fastq.gz", records=20)
+        page.selected_files = [reads]
+        page.output_directory = root / "out"
+        page._rebuild_project()
+        return page
+
+    def test_a_bare_machine_is_given_one_instruction(self):
+        page = self._page_with_input()
+        message = page.status_label.text()
+        self.assertIn("Setup & Resources", message)
+        self.assertNotIn(",", message, "a catalogue of components reads as a fault report")
+        self.assertFalse(page.run_button.isEnabled())
+
+    def test_a_partly_installed_machine_names_what_is_missing(self):
+        import support
+
+        support.install_fake_micromamba(self.config)
+        page = self._page_with_input()
+        message = page.status_label.text()
+        self.assertIn("Install", message)
+        self.assertIn("Setup & Resources", message)
+
+    def test_the_list_is_capped_rather_than_unbounded(self):
+        import support
+
+        support.install_fake_micromamba(self.config)
+        page = self._page_with_input()
+        # Two named, the rest counted: the point is what to do, not an inventory.
+        self.assertLessEqual(page.status_label.text().count(","), 2)
+
+
+@unittest.skipIf(QApplication is None, "PyQt6 is not installed")
+class ExcludedInputTests(unittest.TestCase):
+    """Files that were selected but did not become samples.
+
+    Two files sharing a basename would overwrite each other's outputs, so one is
+    excluded. That is logged, but the readiness line said only "Ready", which
+    reads as though everything selected is about to be analysed.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.application = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from backend.config import BOWTIE2_INDEX_PARTS, reload_config
+        from backend.setup.registry import database_specs
+        import support
+
+        isolate_bioflow_data_directory(self)
+        self.config = reload_config()
+        support.install_fake_micromamba(self.config)
+        for key in ("qc", "hostrem", "taxonomy"):
+            support.install_fake_environment(self.config, key)
+        prefix = self.config.managed_grch38_index_prefix
+        prefix.parent.mkdir(parents=True, exist_ok=True)
+        for part in BOWTIE2_INDEX_PARTS:
+            Path(f"{prefix}.{part}.bt2").write_bytes(b"x" * 64)
+        spec = database_specs()["metaphlan_chocophlan"]
+        directory = self.config.database_directory(*spec.directory_parts)
+        directory.mkdir(parents=True, exist_ok=True)
+        for pattern in spec.required_globs:
+            (directory / pattern).write_bytes(b"x" * 64)
+
+        self._temporary = tempfile.TemporaryDirectory(prefix="bioflow-excluded-")
+        self.root = Path(self._temporary.name)
+        self.addCleanup(self._temporary.cleanup)
+
+    def _page_with(self, files):
+        from gui.pages.pipeline_page import PipelinePage
+
+        page = PipelinePage()
+        page.selected_files = files
+        page.output_directory = self.root / "out"
+        page._rebuild_project()
+        return page
+
+    def test_an_ordinary_selection_says_only_that_it_is_ready(self):
+        files = [write_fastq(self.root / "c" / f"s{i}.fastq.gz", records=20) for i in (1, 2)]
+        page = self._page_with(files)
+        self.assertEqual(len(page.project.samples), 2)
+        self.assertTrue(page.run_button.isEnabled())
+        self.assertNotIn("excluded", page.status_label.text())
+
+    def test_an_excluded_file_is_named_in_the_readiness_line(self):
+        files = [
+            write_fastq(self.root / "d1" / "a.fastq.gz", records=20),
+            write_fastq(self.root / "d2" / "a.fastq.gz", records=20),
+        ]
+        page = self._page_with(files)
+        self.assertEqual(len(page.project.samples), 1, "the duplicate name was not rejected")
+        message = page.status_label.text()
+        self.assertIn("Ready", message)
+        self.assertIn("excluded", message)
+        self.assertTrue(
+            page.run_button.isEnabled(),
+            "one unusable file among many must not block the whole run",
+        )

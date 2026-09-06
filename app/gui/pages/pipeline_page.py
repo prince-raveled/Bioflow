@@ -6,7 +6,6 @@ from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -26,18 +25,28 @@ from backend.execution.pipeline import PipelineEvent, PipelineExecutor, default_
 from backend.execution.record import StageStatus
 from backend.execution.stage import RunOptions
 from backend.history import RunHistory
+from backend.release import functional_profiling_enabled
 from backend.project import Project
 from backend.samples import FASTQ_FILE_FILTER, ReadLayout, validate_sample
-from gui import theme
+from gui import dialogs, theme
 from gui.widgets.stage_flow import StageFlow
 from gui.widgets.status_badge import StatusBadge
 
 
 
+#: What the taxonomic profiler is given, in reads. None means every read.
+SUBSAMPLE_CHOICES = (
+    ("All reads", None),
+    ("100k pairs", 100_000),
+    ("500k pairs", 500_000),
+    ("1M pairs", 1_000_000),
+)
+
+#: Detection first, then each layout the backend models. The labels come from
+#: the enum so they cannot drift from the names used elsewhere.
 LAYOUT_CHOICES = [
     ("Detect automatically", None),
-    ("Single-end", ReadLayout.SINGLE),
-    ("Paired-end", ReadLayout.PAIRED),
+    *((layout.label, layout) for layout in (ReadLayout.SINGLE, ReadLayout.PAIRED)),
 ]
 
 
@@ -57,7 +66,17 @@ class PipelineWorker(QObject):
         self.resume = resume
 
     def run(self) -> None:
-        outcome = self.executor.run(self.samples, resume=self.resume)
+        # `finished` is the only thing that returns the interface to an idle
+        # state, so it has to be emitted on every path out of here. An exception
+        # escaping this method leaves the run button disabled and the page
+        # waiting on a signal that will never arrive, with nothing on screen to
+        # say why.
+        try:
+            outcome = self.executor.run(self.samples, resume=self.resume)
+        except Exception as error:  # noqa: BLE001 - reported, never swallowed
+            self.log.emit(f"ERROR: the analysis stopped unexpectedly: {error!r}")
+            self.finished.emit(False, f"The analysis stopped unexpectedly: {error}")
+            return
         self.finished.emit(outcome.succeeded, outcome.message)
 
     def cancel(self) -> None:
@@ -173,15 +192,71 @@ class PipelinePage(QWidget):
         row = QHBoxLayout(frame)
         row.setContentsMargins(12, 8, 12, 8)
         row.addWidget(QLabel("Stages"))
+        ready = self._installed_stage_keys()
         for stage in default_stages():
             box = QCheckBox(stage.title.split(" (")[0])
-            box.setToolTip(f"{stage.title} — environment: {stage.environment_key}")
-            box.setChecked(True)
+            installed = stage.key in ready
+            if installed:
+                box.setToolTip(f"{stage.title} — environment: {stage.environment_key}")
+            else:
+                # Say why it starts unticked, so an empty checkbox does not read
+                # as an arbitrary default the user has to guess at.
+                box.setToolTip(
+                    f"{stage.title} — needs the {stage.environment_key} environment, "
+                    f"which is not installed. Add it from Setup & Resources."
+                )
+            box.setChecked(installed)
             box.stateChanged.connect(lambda _s: self._on_stage_toggled())
             self.stage_boxes[stage.key] = box
             row.addWidget(box)
         row.addStretch()
         return frame
+
+    def _describe_missing_backends(self, executor, missing: list[str]) -> str:
+        """Say what to do about missing backends, not merely what is absent.
+
+        Listing every component reads as a fault report rather than an
+        instruction. On a machine where nothing has been installed the list is
+        the entire catalogue, which is how a first run comes to look broken
+        instead of unconfigured.
+        """
+        if "micromamba" in missing:
+            # Nothing at all is set up; naming individual pieces helps nobody.
+            return (
+                "No analysis backends are installed yet. "
+                "Open Setup & Resources to install them."
+            )
+        described = executor.describe_missing(missing[:2])
+        remainder = len(missing) - 2
+        if remainder > 0:
+            described += f", and {remainder} more"
+        return f"Install {described} from Setup & Resources to run these stages."
+
+    def _installed_stage_keys(self) -> set[str]:
+        """Stages whose environment is present, and so can actually run.
+
+        Ticking a stage whose backend is absent disables the run button for the
+        whole pipeline, so a stage the machine cannot execute would block every
+        stage it can. Functional profiling is the case that matters now: it is
+        not part of this release, and left ticked it would stop a fully
+        installed taxonomic run from starting.
+
+        If nothing at all is installed there is no useful subset to offer, so
+        every stage is ticked and the readiness line directs the user to Setup.
+        """
+        from backend.setup.manager import SetupManager
+
+        stages = default_stages()
+        try:
+            manager = SetupManager(self.config)
+            installed = {
+                stage.key for stage in stages
+                if manager.environment_installed(stage.environment_key)
+            }
+        except OSError:
+            # Never let a probe of the filesystem stop the page from building.
+            return {stage.key for stage in stages}
+        return installed or {stage.key for stage in stages}
 
     def _on_stage_toggled(self):
         self._sync_flow_selection()
@@ -222,6 +297,10 @@ class PipelinePage(QWidget):
         self.thread_count.setObjectName("threadCount")
         row.addWidget(self.thread_count)
 
+        # The option belongs to functional profiling, so it appears only when
+        # that stage does. It stays constructed either way: the run options are
+        # built from it unconditionally, and a release that withholds the stage
+        # should not have to change how they are assembled.
         self.protein_only = QCheckBox("HUMAnN protein-only mode")
         self.protein_only.setChecked(True)
         self.protein_only.setToolTip(
@@ -230,7 +309,26 @@ class PipelinePage(QWidget):
             "genes are not attributed to individual species."
         )
         self.protein_only.stateChanged.connect(lambda _s: self.refresh_readiness())
-        row.addWidget(self.protein_only)
+        if functional_profiling_enabled():
+            row.addWidget(self.protein_only)
+        else:
+            self.protein_only.setVisible(False)
+
+        # Subsampling is a speed control, not a quality one: it profiles fewer
+        # reads and discards the rest, so "All reads" leads and is the default.
+        row.addWidget(QLabel("Profile"))
+        self.subsample_choice = QComboBox()
+        for label, value in SUBSAMPLE_CHOICES:
+            self.subsample_choice.addItem(label, value)
+        self.subsample_choice.setToolTip(
+            "How much of each sample to profile. Every read is used unless a "
+            "limit is chosen here; a limit makes a long run finish sooner at the "
+            "cost of the reads it leaves out."
+        )
+        self.subsample_choice.currentIndexChanged.connect(
+            lambda _index: self.refresh_readiness()
+        )
+        row.addWidget(self.subsample_choice)
 
         self.resume_box = QCheckBox("Reuse valid results")
         self.resume_box.setChecked(True)
@@ -274,7 +372,7 @@ class PipelinePage(QWidget):
     # Input handling
     # ------------------------------------------------------------------
     def select_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Select FASTQ files", "", FASTQ_FILE_FILTER)
+        files = dialogs.open_files(self, "Select FASTQ files", FASTQ_FILE_FILTER)
         if not files:
             return
         self.selected_files = [Path(name) for name in files]
@@ -284,7 +382,7 @@ class PipelinePage(QWidget):
         self._rebuild_project()
 
     def select_output_directory(self):
-        directory = QFileDialog.getExistingDirectory(
+        directory = dialogs.existing_directory(
             self, "Select results folder", str(self.output_directory or Path.home())
         )
         if directory:
@@ -310,6 +408,7 @@ class PipelinePage(QWidget):
 
         options = RunOptions(
             threads=self.threads.value(),
+            metaphlan_subsample_pairs=self.subsample_choice.currentData(),
             humann_protein_only=self.protein_only.isChecked(),
         )
         name = self.project_name.text().strip() or "bioflow-analysis"
@@ -370,17 +469,21 @@ class PipelinePage(QWidget):
         executor = PipelineExecutor(self.project.context(self.config), stages)
         missing = executor.missing_components()
         if missing:
-            self.status_label.setText(
-                f"Cannot run yet — not installed: {executor.describe_missing(missing)}. "
-                f"Install it from Setup & Resources."
-            )
+            self.status_label.setText(self._describe_missing_backends(executor, missing))
             self.run_button.setEnabled(False)
             return
 
-        self.status_label.setText(
+        ready = (
             f"Ready: {len(stages)} stage(s) over {len(self.project.samples)} "
             f"{self.project.layout.label.lower()} sample(s)."
         )
+        if problems:
+            # Some selected files did not become samples. That is reported in
+            # the log, but "Ready" on its own reads as though everything chosen
+            # is about to be analysed.
+            count = len(problems)
+            ready += f" {count} selected file(s) excluded — see the log."
+        self.status_label.setText(ready)
         self.run_button.setEnabled(True)
 
     # ------------------------------------------------------------------
@@ -392,6 +495,7 @@ class PipelinePage(QWidget):
         stages = self.selected_stages()
         self.project.options = RunOptions(
             threads=self.threads.value(),
+            metaphlan_subsample_pairs=self.subsample_choice.currentData(),
             humann_protein_only=self.protein_only.isChecked(),
         )
         self.project.stage_keys = [stage.key for stage in stages]

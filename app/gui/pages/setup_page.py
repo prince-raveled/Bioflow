@@ -5,7 +5,6 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
-    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -22,12 +21,22 @@ from backend.setup.bootstrap import human_bytes
 from backend.setup.executor import PlanExecutor
 from backend.setup.manager import ComponentStatus, SetupManager
 from backend.setup.preflight import blocking_failures, free_bytes, run_preflight
-from gui import theme
+from gui import dialogs, theme
 from gui.widgets.status_badge import StatusBadge
 
 
 #: Everything needed for the QC and host-removal workflow, pre-selected.
-CORE_COMPONENTS = ("env:qc", "env:hostrem", "db:grch38")
+#: Pre-ticked when the page first opens: everything one complete analysis needs,
+#: and nothing it does not. This release ends at taxonomic profiling, so
+#: functional profiling and its ~30 GB of reference data are deliberately absent
+#: - they stay installable, just not offered by default.
+CORE_COMPONENTS = (
+    "env:qc",
+    "env:hostrem",
+    "env:taxonomy",
+    "db:grch38",
+    "db:metaphlan_chocophlan",
+)
 
 #: Maps a resource state onto the badge colour that communicates it.
 STATE_APPEARANCE = {
@@ -49,20 +58,35 @@ class SetupWorker(QObject):
     """Run a setup plan off the GUI thread and report progress back to it."""
 
     output = pyqtSignal(str)
+    #: Live transfer text and completion percentage, or -1.0 when unknown.
+    transfer = pyqtSignal(str, float)
     step_started = pyqtSignal(str, int, int)
     finished = pyqtSignal(bool, str)
 
     def __init__(self, plan):
         super().__init__()
         self.executor = PlanExecutor(
-            plan, on_step=self._announce_step, on_output=self.output.emit
+            plan,
+            on_step=self._announce_step,
+            on_output=self.output.emit,
+            on_progress=self._announce_transfer,
         )
+
+    def _announce_transfer(self, update) -> None:
+        self.transfer.emit(update.text, -1.0 if update.percent is None else update.percent)
 
     def _announce_step(self, step, index: int, total: int) -> None:
         self.step_started.emit(step.title, index, total)
 
     def run(self) -> None:
-        succeeded, message = self.executor.run()
+        # As on the pipeline page: whatever happens, the interface must be told
+        # the work has stopped, or Install stays disabled for the session.
+        try:
+            succeeded, message = self.executor.run()
+        except Exception as error:  # noqa: BLE001 - reported, never swallowed
+            self.output.emit(f"ERROR: setup stopped unexpectedly: {error!r}")
+            self.finished.emit(False, f"Setup stopped unexpectedly: {error}")
+            return
         self.finished.emit(succeeded, message)
 
     def cancel(self) -> None:
@@ -214,6 +238,18 @@ class SetupPage(QWidget):
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
 
+        # Downloads redraw their progress thousands of times. They belong on a
+        # line that is overwritten, not in the log, which is for what happened.
+        self.transfer_bar = QProgressBar()
+        self.transfer_bar.setTextVisible(True)
+        self.transfer_bar.setVisible(False)
+        self.transfer_bar.setRange(0, 100)
+        layout.addWidget(self.transfer_bar)
+        self.transfer_label = QLabel()
+        self.transfer_label.setObjectName("transferStatus")
+        self.transfer_label.setVisible(False)
+        layout.addWidget(self.transfer_label)
+
         log_title = QLabel("Setup log")
         log_title.setObjectName("logTitle")
         layout.addWidget(log_title)
@@ -276,11 +312,11 @@ class SetupPage(QWidget):
 
     def select_external_index(self) -> None:
         """Persist an explicitly chosen external index after validating it."""
-        file_name, _ = QFileDialog.getOpenFileName(
+        file_name = dialogs.open_file(
             self,
             "Select any file of the GRCh38 Bowtie2 index",
-            str(self.config.database_root),
             "Bowtie2 index (*.bt2 *.bt2l);;All files (*)",
+            str(self.config.database_root),
         )
         if not file_name:
             return
@@ -365,16 +401,24 @@ class SetupPage(QWidget):
             extra = f", {pulled_in} added automatically"
         else:
             extra = ""
+        # Two different questions: how long the download takes, and whether the
+        # disk can hold it while it unpacks.
+        download = self.manager.estimated_download_bytes(keys)
+        peak = self.manager.estimated_peak_bytes(keys)
         self.summary_label.setText(
             f"{len(plan.components)} component(s) to install{extra}  •  {len(plan)} step(s)  •  "
-            f"about {human_bytes(plan.estimated_bytes)} to install  •  "
-            f"{human_bytes(free_bytes(self.config.database_root))} free"
+            f"{human_bytes(download)} to download, needs {human_bytes(peak)} free while "
+            f"installing  •  {human_bytes(free_bytes(self.config.database_root))} available"
         )
         self.install_button.setEnabled(self.thread is None)
-        self._show_preflight(plan.estimated_bytes)
+        self._show_preflight(peak)
 
     def _show_preflight(self, required_bytes: int) -> None:
-        checks = run_preflight(self.config, required_bytes)
+        checks = run_preflight(
+            self.config,
+            required_bytes,
+            required_memory_bytes=self.manager.required_memory_bytes(self.selected_keys()),
+        )
         self.preflight_label.setText(
             "   ".join(
                 f"[{'OK' if check.passed else 'PROBLEM'}] {check.name}: {check.detail}"
@@ -394,9 +438,14 @@ class SetupPage(QWidget):
             self.add_log("Select at least one component to install.")
             return
 
-        required = self.manager.estimated_bytes(keys)
+        required = self.manager.estimated_peak_bytes(keys)
         failures = blocking_failures(
-            run_preflight(self.config, required, use_network_cache=False)
+            run_preflight(
+                self.config,
+                required,
+                use_network_cache=False,
+                required_memory_bytes=self.manager.required_memory_bytes(keys),
+            )
         )
         if failures:
             for failure in failures:
@@ -420,6 +469,7 @@ class SetupPage(QWidget):
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.output.connect(self.add_log)
+        self.worker.transfer.connect(self._show_transfer)
         self.worker.step_started.connect(self._announce_step)
         self.worker.finished.connect(self._setup_finished)
         self._set_running(True)
@@ -484,6 +534,9 @@ class SetupPage(QWidget):
         self.cancel_button.setEnabled(running)
         self.progress.setVisible(running)
         if not running:
+            self.transfer_bar.setVisible(False)
+            self.transfer_label.setVisible(False)
+        if not running:
             self.progress.reset()
         if running:
             for row in self.rows.values():
@@ -491,6 +544,21 @@ class SetupPage(QWidget):
         else:
             # refresh() restores each row's correct enabled state from its status.
             self.refresh()
+
+    def _show_transfer(self, text: str, percent: float) -> None:
+        """Replace the live transfer line rather than appending to the log."""
+        self.transfer_label.setText(text)
+        self.transfer_label.setVisible(True)
+        if percent < 0.0:
+            self.transfer_bar.setRange(0, 0)  # Busy indicator; no total known.
+        else:
+            self.transfer_bar.setRange(0, 100)
+            self.transfer_bar.setValue(int(percent))
+        self.transfer_bar.setVisible(True)
+        # The session log keeps the full detail the panel deliberately drops,
+        # so a failed install can still be diagnosed after the fact.
+        if self.session_log:
+            self.session_log.write(text)
 
     def add_log(self, message: str) -> None:
         self.log.append(message)

@@ -14,6 +14,29 @@ from backend.execution.stage import (
 from backend.samples import Sample
 
 
+#: What fastp prints when the two mate files hold different numbers of reads.
+#: It prints this, pairs as far as the shorter file goes, discards the rest of
+#: the longer one, and exits zero. Left unchecked that is silent data loss
+#: reported as a success: 500 reads against 250 produced a clean run with eight
+#: passing checks and 250 reads quietly thrown away.
+MISMATCHED_PAIR_NOTICE = "different read numbers"
+
+
+def mismatched_pair_report(log_path: Path) -> str:
+    """fastp's own account of a pairing mismatch, or "" when there was none."""
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if MISMATCHED_PAIR_NOTICE not in text:
+        return ""
+    sizes = [
+        line.strip() for line in text.splitlines()
+        if line.strip().startswith(("Read1 pack size", "Read2 pack size"))
+    ]
+    return "; ".join(sizes[:2]) or "fastp reported different read numbers between the mates"
+
+
 class FastpStage(Stage):
     """Trim adapters and low-quality bases.
 
@@ -24,6 +47,8 @@ class FastpStage(Stage):
 
     key = "fastp"
     title = "Trimming (fastp)"
+    short_title = "Trim"
+    chip_title = "Trim"
     environment_key = "qc"
 
     def inputs(self, sample: Sample, context: RunContext) -> list[Path]:
@@ -99,5 +124,16 @@ class FastpStage(Stage):
                 "fastp reported both mates",
                 expected,
                 "" if expected else "no read2 section in the fastp report",
+            )
+            # fastp's counts describe what it consumed, not what it was given,
+            # so a mismatch is invisible in the report and has to be read from
+            # what the tool said at the time.
+            mismatch = mismatched_pair_report(
+                workspace.stage_log(self.key, sample.name, "err")
+            )
+            result.add(
+                "the two mate files hold the same number of reads",
+                not mismatch,
+                mismatch or "",
             )
         return result

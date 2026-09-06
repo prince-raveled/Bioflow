@@ -276,6 +276,22 @@ class BioFlowConfig:
         self.save()
 
     @property
+    def bowtie2_executable(self) -> Path:
+        """Bowtie2 inside the taxonomy environment, which MetaPhlAn drives."""
+        return self.environment_prefix("taxonomy") / "bin" / "bowtie2"
+
+    @property
+    def bowtie2_memory_mapped_shim(self) -> Path:
+        """A small script that runs Bowtie2 with its index memory-mapped.
+
+        MetaPhlAn offers no way to pass extra arguments through to Bowtie2, only
+        a path to the executable, so the option is added by pointing it at a
+        one-line script instead. It lives in BioFlow's own bin directory beside
+        Micromamba, never in a user's home.
+        """
+        return self.binary_directory / "bowtie2-mm"
+
+    @property
     def metaphlan_database_directory(self) -> Path:
         return self.database_directory("metaphlan")
 

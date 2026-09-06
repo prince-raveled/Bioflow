@@ -35,10 +35,27 @@ def flat(stage, sample, context) -> list[str]:
 
 class StageOrderTests(unittest.TestCase):
     def test_the_documented_workflow_order(self):
+        # The specification's order, including stages a given release withholds.
+        from backend.execution.pipeline import all_stages
+
         self.assertEqual(
-            [stage.key for stage in default_stages()],
+            [stage.key for stage in all_stages()],
             ["fastqc_raw", "fastp", "fastqc_trimmed", "host_removal", "metaphlan", "humann", "multiqc"],
         )
+
+    def test_this_release_offers_the_workflow_up_to_taxonomic_profiling(self):
+        # Functional profiling needs resources beyond what this version targets.
+        self.assertEqual(
+            [stage.key for stage in default_stages()],
+            ["fastqc_raw", "fastp", "fastqc_trimmed", "host_removal", "metaphlan", "multiqc"],
+        )
+
+    def test_the_withheld_stage_is_still_built_and_reachable(self):
+        # Withheld, not deleted: it must keep working for the release that ships it.
+        from backend.execution.pipeline import stages_by_key
+
+        stage = stages_by_key()["humann"]
+        self.assertEqual(stage.environment_key, "function")
 
     def test_each_stage_declares_its_environment(self):
         expected = {

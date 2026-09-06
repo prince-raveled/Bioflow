@@ -8,7 +8,8 @@ where a file lives and what it is called.
 from dataclasses import dataclass
 from pathlib import Path
 
-from backend.samples import Sample
+from backend.release import functional_profiling_enabled
+from backend.samples import FASTQ_EXTENSIONS, Sample
 
 
 @dataclass(frozen=True)
@@ -51,10 +52,6 @@ class Workspace:
         return self.root / "logs"
 
     @property
-    def reports(self) -> Path:
-        return self.root / "reports"
-
-    @property
     def checkpoint_file(self) -> Path:
         return self.root / "bioflow-run.json"
 
@@ -63,17 +60,24 @@ class Workspace:
         return self.root / "bioflow-project.json"
 
     def all_directories(self) -> list[Path]:
-        return [
+        """Directories a run of this build will actually write into.
+
+        Functional profiling is withheld from this release, and creating its
+        directory anyway leaves an empty "06_functional" in every result folder,
+        describing a stage that cannot run.
+        """
+        directories = [
             self.qc_raw,
             self.trimmed,
             self.qc_trimmed,
             self.host_removed,
             self.taxonomy,
-            self.functional,
             self.multiqc,
             self.logs,
-            self.reports,
         ]
+        if functional_profiling_enabled():
+            directories.insert(directories.index(self.multiqc), self.functional)
+        return directories
 
     def create(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -113,7 +117,15 @@ class Workspace:
         return self.taxonomy / f"{sample.name}_profile.txt"
 
     def taxonomic_map(self, sample: Sample) -> Path:
-        return self.taxonomy / f"{sample.name}_map.bam"
+        """MetaPhlAn's read-to-marker mapping, saved by --mapout.
+
+        Not a BAM, despite what this file used to be called. MetaPhlAn writes
+        this as text and compresses it only when the name ends in ".bz2"
+        (metaphlan.py: `bz2.open(...) if self.mapout.endswith(".bz2") else
+        open(...)`), so the old name both misdescribed the format and opted out
+        of the compression the tool expects to apply to it.
+        """
+        return self.taxonomy / f"{sample.name}_map.txt.bz2"
 
     def functional_directory(self, sample: Sample) -> Path:
         return self.functional / sample.name
@@ -127,7 +139,7 @@ class Workspace:
     def humann_outputs(self, sample: Sample) -> dict[str, Path]:
         directory = self.functional_directory(sample)
         stem = self.humann_input(sample).name
-        for extension in (".fastq.gz", ".fq.gz", ".fastq", ".fq"):
+        for extension in FASTQ_EXTENSIONS:
             if stem.lower().endswith(extension):
                 stem = stem[: -len(extension)]
                 break

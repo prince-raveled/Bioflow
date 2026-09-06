@@ -1,10 +1,11 @@
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPushButton, QSlider
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSlider
 
 from backend.samples import FASTQ_FILE_FILTER
 from gui.pages.qc_tool_page import QCToolPage
+from gui import dialogs
 
 
 class FastQCPage(QCToolPage):
@@ -26,12 +27,12 @@ class FastQCPage(QCToolPage):
         row.addWidget(QLabel("Threads"))
         self.threads = QSlider(Qt.Orientation.Horizontal)
         self.threads.setRange(1, 32)
-        self.threads.setValue(4)
+        self.threads.setValue(self.default_thread_count())
         self.threads.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.threads.setTickInterval(4)
         self.threads.valueChanged.connect(self._show_thread_count)
         row.addWidget(self.threads)
-        self.thread_count = QLabel("04")
+        self.thread_count = QLabel(self.thread_label(self.threads.value()))
         self.thread_count.setObjectName("threadCount")
         row.addWidget(self.thread_count)
         self.controls.addLayout(row)
@@ -41,7 +42,7 @@ class FastQCPage(QCToolPage):
         self.thread_count.setText(f"{value:02d}")
 
     def select_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Select FASTQ files", "", FASTQ_FILE_FILTER)
+        files = dialogs.open_files(self, "Select FASTQ files", FASTQ_FILE_FILTER)
         if files:
             self.fastq_files = files
             self.set_default_output_directory(

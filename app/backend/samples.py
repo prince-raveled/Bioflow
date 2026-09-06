@@ -245,9 +245,14 @@ def read_identifier(header: str) -> str:
 def validate_fastq_file(path: Path, records_to_check: int = 2) -> FastqValidation:
     """Check that a file is a readable FASTQ before committing to a long run.
 
-    This deliberately reads only the first few records: it catches truncated
-    downloads, wrong file types, and mis-named text files without paying to
-    stream a multi-gigabyte file.
+    This deliberately reads only the first few records: it catches an empty
+    file, the wrong file type, a mis-named text file, and a download that
+    stopped before the first records were written, without paying to stream a
+    multi-gigabyte file.
+
+    It does not catch a file truncated further in - nothing that reads a
+    prefix can. That is caught where it matters instead: every output a stage
+    produces is decompressed in full before the stage is called successful.
     """
     if not path.exists():
         return FastqValidation(path, False, "file does not exist")

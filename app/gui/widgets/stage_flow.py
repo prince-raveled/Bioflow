@@ -123,20 +123,13 @@ class StageFlow(QWidget):
         self._timer.setInterval(320)
         self._timer.timeout.connect(self._tick)
 
-    #: Chip labels are short by design; the full title lives in the tooltip.
-    SHORT_NAMES = {
-        "fastqc_raw": "FastQC",
-        "fastp": "Trim",
-        "fastqc_trimmed": "FastQC",
-        "host_removal": "Host",
-        "metaphlan": "MetaPhlAn",
-        "humann": "HUMAnN",
-        "multiqc": "MultiQC",
-    }
+    @staticmethod
+    def _short_title(stage) -> str:
+        """The chip label, taken from the stage rather than a table kept here.
 
-    @classmethod
-    def _short_title(cls, stage) -> str:
-        return cls.SHORT_NAMES.get(stage.key, stage.title.split(" (")[0])
+        Chip labels are short by design; the full title lives in the tooltip.
+        """
+        return stage.chip_title or stage.title.split(" (")[0]
 
     # ------------------------------------------------------------------
     def set_stage_status(self, key: str, status: StageStatus, detail: str = "") -> None:

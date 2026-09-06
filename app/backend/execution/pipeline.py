@@ -20,6 +20,7 @@ from backend.execution.record import (
 )
 from backend.execution.runner import CommandCancelled, CommandRunner
 from backend.execution.stage import RunContext, Stage
+from backend.release import stage_is_available
 from backend.execution.stages.functional import HumannStage
 from backend.execution.stages.host_removal import HostRemovalStage
 from backend.execution.stages.qc import MultiQCStage, fastqc_raw_stage, fastqc_trimmed_stage
@@ -34,8 +35,12 @@ LogCallback = Callable[[str], None]
 PROJECT_SAMPLE = Sample(name="project", layout=ReadLayout.SINGLE, read1=Path("."))
 
 
-def default_stages() -> list[Stage]:
-    """The workflow order documented in the project specification."""
+def all_stages() -> list[Stage]:
+    """Every stage in the workflow order documented in the specification.
+
+    Includes stages this release withholds; use `default_stages` for what the
+    application actually offers.
+    """
     return [
         fastqc_raw_stage(),
         FastpStage(),
@@ -47,8 +52,14 @@ def default_stages() -> list[Stage]:
     ]
 
 
+def default_stages() -> list[Stage]:
+    """The stages this release offers, in workflow order."""
+    return [stage for stage in all_stages() if stage_is_available(stage.key)]
+
+
 def stages_by_key() -> dict[str, Stage]:
-    return {stage.key: stage for stage in default_stages()}
+    """Every stage by key, including withheld ones, so tests can reach them."""
+    return {stage.key: stage for stage in all_stages()}
 
 
 @dataclass
@@ -126,7 +137,22 @@ class PipelineExecutor:
     def run(self, samples: list[Sample], resume: bool = True) -> PipelineOutcome:
         """Execute the pipeline. Refuses to start if a backend is missing."""
         workspace = self.context.workspace
-        workspace.create()
+        try:
+            workspace.create()
+        except OSError as error:
+            # A results folder that cannot be made is an ordinary mistake - a
+            # read-only disk, a removed drive, a path typed by hand - and the
+            # user can fix it immediately if told. Letting it escape turned it
+            # into "the analysis stopped unexpectedly" with an errno.
+            message = (
+                f"Analysis not started: the results folder {workspace.root} "
+                f"could not be created ({error.strerror or error}). Choose a "
+                f"different folder."
+            )
+            self.log(message)
+            record = PipelineRecord(project_name=workspace.root.name, status=StageStatus.FAILED)
+            record.message = message
+            return PipelineOutcome(record, False, message)
 
         missing = self.missing_components()
         if missing:
@@ -273,11 +299,24 @@ class PipelineExecutor:
 
         try:
             stage.prepare(sample, self.context, self.log)
-        except OSError as error:
+        except Exception as error:  # noqa: BLE001 - recorded against this stage
+            # Broader than OSError on purpose. Preparation is arbitrary
+            # in-process work, and letting anything else escape would abandon
+            # the whole run rather than failing this one stage and carrying on
+            # with the remaining samples, which is how every other failure here
+            # behaves.
             stage_record.status = StageStatus.FAILED
             stage_record.message = f"Preparation failed: {error}"
             stage_record.finished_at = now()
-            self.log(f"ERROR: {stage_record.message}")
+            self.log(f"{header}: FAILED — {stage_record.message}")
+            # Without this the stage sits at "Running" in the interface for the
+            # rest of the session: the flow widget is driven entirely by events.
+            self.emit(
+                PipelineEvent(
+                    stage.key, stage.title, sample.name, StageStatus.FAILED,
+                    position, total, stage_record.message,
+                )
+            )
             return stage_record
 
         for index, stage_command in enumerate(planned, start=1):
@@ -311,6 +350,11 @@ class PipelineExecutor:
         stage_record.finished_at = now()
         if stage_record.validation.valid:
             stage_record.status = StageStatus.COMPLETED
+            # Record what was validated, so a later resume can tell that these
+            # are the same bytes rather than verifying them all over again.
+            stage_record.output_fingerprint = fingerprint_for(
+                [], stage.outputs(sample, self.context)
+            )
             stage_record.message = stage_record.validation.summary()
             self.log(f"{header}: completed — {stage_record.message}")
             self.emit(
@@ -347,4 +391,14 @@ class PipelineExecutor:
             return False
         if not earlier.fingerprint or earlier.fingerprint != fingerprint:
             return False
+        # Verifying an output means decompressing it in full, so re-reading
+        # every output of a finished project just to decide nothing has changed
+        # can take minutes with nothing on screen. Skip that only when the
+        # outputs are byte-identical to the ones already verified; anything
+        # else - a missing file, a different size, a newer timestamp, or a
+        # record from before this was tracked - falls through to the full check.
+        if earlier.output_fingerprint:
+            current = fingerprint_for([], stage.outputs(sample, self.context))
+            if current == earlier.output_fingerprint:
+                return True
         return stage.validate(sample, self.context).valid

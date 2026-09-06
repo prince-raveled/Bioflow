@@ -20,6 +20,9 @@ class CommandStep:
     tolerate_failure: bool = False
     #: Extra attempts for steps whose downloads are large and worth retrying.
     retries: int = 0
+    #: Variables overlaid on the inherited environment. Some subcommands take
+    #: their root prefix only this way: `micromamba clean` rejects -r.
+    environment: dict[str, str] | None = None
 
     def described_command(self) -> str:
         return " ".join([self.program, *self.arguments])

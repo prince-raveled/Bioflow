@@ -30,6 +30,8 @@ class HumannStage(Stage):
 
     key = "humann"
     title = "Functional profiling (HUMAnN)"
+    short_title = "Function"
+    chip_title = "HUMAnN"
     environment_key = "function"
 
     required_databases = ("humann_uniref50",)

@@ -1,8 +1,9 @@
 from pathlib import Path
 
-from PyQt6.QtWidgets import QFileDialog, QLabel, QPushButton
+from PyQt6.QtWidgets import QLabel, QPushButton
 
 from gui.pages.qc_tool_page import QCToolPage
+from gui import dialogs
 
 
 REPORT_FILTER = "QC report files (*.html *.htm *.zip *.json *.txt);;All files (*)"
@@ -26,9 +27,7 @@ class MultiQCPage(QCToolPage):
         self.add_output_selector()
 
     def select_report_files(self):
-        files, _ = QFileDialog.getOpenFileNames(
-            self, "Select QC HTML or report files", "", REPORT_FILTER
-        )
+        files = dialogs.open_files(self, "Select QC HTML or report files", REPORT_FILTER)
         if files:
             self.input_paths = files
             selected_parent = Path(files[0]).resolve().parent

@@ -30,9 +30,132 @@ def _nearest_existing(path: Path) -> Path:
     return Path("/")
 
 
+#: Above this, a reported free-space figure is treated as unverifiable rather
+#: than trusted. Thin-provisioned, virtual and network filesystems report the
+#: volume's nominal size, not what the backing store can actually supply; one
+#: clean-machine install saw 950 GB reported against a ~97 GB disk.
+IMPLAUSIBLE_FREE_BYTES = 2 * 1024 ** 4  # 2 TB
+
+
 def free_bytes(path: Path) -> int:
     """Free space on the filesystem that will hold the given path."""
     return shutil.disk_usage(_nearest_existing(path)).free
+
+
+#: Filesystems that report a volume's nominal size rather than what the backing
+#: store can supply: network mounts, container overlays, and host passthroughs.
+UNVERIFIABLE_FILESYSTEMS = frozenset({
+    "9p", "drvfs", "virtiofs", "cifs", "smb3", "nfs", "nfs4",
+    "overlay", "fuseblk", "vboxsf",
+})
+
+
+def running_under_wsl() -> bool:
+    """True on WSL, where even ext4 sits inside a sparse, growable disk image.
+
+    The filesystem type looks ordinary there, so type alone cannot reveal the
+    problem: a WSL2 volume commonly reports its nominal maximum while the
+    Windows host has far less actually free.
+    """
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        return "microsoft" in Path("/proc/version").read_text(encoding="utf-8").lower()
+    except OSError:
+        return False
+
+
+def filesystem_type(path: Path) -> str:
+    """The mounted filesystem type for a path, or "" when it cannot be read."""
+    target = _nearest_existing(path).resolve()
+    best, best_type = "", ""
+    try:
+        for line in Path("/proc/mounts").read_text(encoding="utf-8").splitlines():
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            mount_point, mount_type = parts[1], parts[2]
+            # The longest matching mount point is the one actually in effect.
+            if str(target) == mount_point or str(target).startswith(mount_point.rstrip("/") + "/"):
+                if len(mount_point) >= len(best):
+                    best, best_type = mount_point, mount_type
+    except OSError:
+        return ""
+    return best_type
+
+
+def free_space_is_trustworthy(free: int, path: Path) -> bool:
+    """Whether a reported free-space figure can be relied on to gate a download.
+
+    This does not try to compute the true figure: there is no portable way to
+    see through a thin-provisioned volume. It only decides whether BioFlow is
+    entitled to assert the number it was given.
+    """
+    if free >= IMPLAUSIBLE_FREE_BYTES:
+        return False
+    if running_under_wsl():
+        return False
+    if filesystem_type(path) in UNVERIFIABLE_FILESYSTEMS:
+        return False
+    total = shutil.disk_usage(_nearest_existing(path)).total
+    # A volume claiming more free space than it has capacity for is incoherent.
+    return free <= total
+
+
+#: Floor for running BioFlow at all, when no component asks for more.
+BASELINE_MEMORY_BYTES = 8 * 1024 ** 3
+
+
+def available_memory_bytes() -> int:
+    """Memory free for a new process now, or 0 when it cannot be determined.
+
+    Installed RAM is the wrong question for an aligner: a machine with 14 GB
+    fitted but an editor and a browser open cannot spare the 10 GB MetaPhlAn
+    wants, and the kernel resolves that by killing something.
+    """
+    try:
+        text = Path("/proc/meminfo").read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    for line in text.splitlines():
+        if line.startswith("MemAvailable:"):
+            try:
+                return int(line.split()[1]) * 1024
+            except (ValueError, IndexError):
+                return 0
+    return 0
+
+
+def swap_bytes() -> tuple[int, int]:
+    """Total swap, and how much of it is zram, in bytes.
+
+    The two are not interchangeable. zram is compressed memory living in RAM:
+    it buys room only to the extent the pages compress, and the largest thing
+    BioFlow runs - MetaPhlAn's ~7 GB marker table - compresses badly. Swap on a
+    disk is where a page can actually go when RAM is full.
+
+    This distinction is not academic. A 14 GB machine with 8 GB of zram and no
+    disk swap had MetaPhlAn killed at 6.8 GB twice; the same machine, same
+    command, with a 16 GB swapfile added, ran it to completion.
+    """
+    total = 0
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("SwapTotal:"):
+                total = int(line.split()[1]) * 1024
+                break
+    except (OSError, ValueError, IndexError):
+        return 0, 0
+
+    compressed = 0
+    try:
+        for line in Path("/proc/swaps").read_text(encoding="utf-8").splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 3 and "zram" in parts[0]:
+                compressed += int(parts[2]) * 1024
+    except (OSError, ValueError, IndexError):
+        compressed = 0
+    return total, compressed
 
 
 def total_memory_bytes() -> int:
@@ -76,8 +199,78 @@ def has_network(
     return reachable
 
 
+
+#: Room a desktop session needs alongside the analysis. Below this much spare
+#: RAM the kernel has to be able to push something to disk, or it kills instead.
+#: Measured: a 15 GB machine running a 10 GB component - 5 GB spare - was killed
+#: with zram-only swap, and completed once a disk swapfile was added.
+DESKTOP_RESERVE_BYTES = 6 * 1024 ** 3
+
+
+def swap_file_instructions(size_bytes: int, path: Path) -> str:
+    """The commands that actually add swap on this machine's filesystem.
+
+    Not the same everywhere, which is why "add a swap file" on its own is poor
+    advice. A btrfs swap file has to be made with btrfs' own tool: it must be
+    nocow, uncompressed and unsnapshotted, and a file produced by fallocate is
+    none of those and will be refused. The size is rounded up to a whole number
+    of gigabytes because that is how these commands take it.
+    """
+    gigabytes = max(1, -(-size_bytes // 1024 ** 3))
+    filesystem = filesystem_type(path)
+    if filesystem == "btrfs":
+        create = f"sudo btrfs filesystem mkswapfile --size {gigabytes}G /swapfile"
+    else:
+        create = (
+            f"sudo fallocate -l {gigabytes}G /swapfile && "
+            f"sudo chmod 600 /swapfile && sudo mkswap /swapfile"
+        )
+    return (
+        f"{create}; sudo swapon /swapfile; "
+        f"echo '/swapfile none swap defaults 0 0' | sudo tee -a /etc/fstab"
+    )
+
+
+def _swap_check(memory: int, required: int, swap_total: int, swap_compressed: int) -> SystemCheck:
+    """Whether the machine can survive a component asking for most of its RAM.
+
+    RAM alone is enough when there is room to spare after the largest component
+    has taken its share. When there is not, the kernel needs somewhere to put
+    cold pages, and only swap on a disk counts: zram is compressed memory, and
+    the marker table that drives this requirement does not compress well.
+    """
+    disk_swap = max(0, swap_total - swap_compressed)
+    spare = memory - required
+    if spare >= DESKTOP_RESERVE_BYTES:
+        return SystemCheck(
+            "Swap", True, f"{human_bytes(spare)} of RAM to spare; swap is not needed"
+        )
+    if disk_swap >= required:
+        return SystemCheck(
+            "Swap", True, f"{human_bytes(disk_swap)} on disk, enough to cover a "
+                          f"{human_bytes(required)} component"
+        )
+    zram_note = (
+        f" {human_bytes(swap_compressed)} of zram does not count: it is compressed "
+        f"RAM, and this data compresses poorly."
+        if swap_compressed else ""
+    )
+    return SystemCheck(
+        "Swap",
+        False,
+        f"only {human_bytes(spare)} of RAM to spare and {human_bytes(disk_swap)} of "
+        f"swap on disk.{zram_note} A {human_bytes(required)} component can be killed "
+        f"here. Add a swap file — the last line makes it survive a reboot, which "
+        f"a swap file added by hand does not:  "
+        + swap_file_instructions(required, Path.home()),
+    )
+
+
 def run_preflight(
-    config: BioFlowConfig, required_bytes: int = 0, use_network_cache: bool = True
+    config: BioFlowConfig,
+    required_bytes: int = 0,
+    use_network_cache: bool = True,
+    required_memory_bytes: int = 0,
 ) -> list[SystemCheck]:
     """Return every system check, including a disk test for a planned install."""
     checks: list[SystemCheck] = []
@@ -96,13 +289,27 @@ def run_preflight(
     checks.append(SystemCheck("CPU cores", cores >= 2, f"{cores} core(s) available"))
 
     memory = total_memory_bytes()
-    checks.append(
-        SystemCheck(
-            "Memory",
-            memory == 0 or memory >= 8 * 1024 ** 3,
-            human_bytes(memory) + " installed" if memory else "Could not be determined",
+    swap_total, swap_compressed = swap_bytes()
+    needed_memory = max(required_memory_bytes, BASELINE_MEMORY_BYTES)
+    if memory == 0:
+        memory_detail = "Could not be determined"
+    elif memory >= needed_memory:
+        memory_detail = f"{human_bytes(memory)} installed"
+        if swap_total:
+            memory_detail += f", {human_bytes(swap_total)} swap"
+    else:
+        # Name the component's requirement rather than a generic floor: an
+        # alignment killed by the kernel part-way through looks like a crash,
+        # and the user has no way to connect it back to their RAM.
+        memory_detail = (
+            f"{human_bytes(memory)} installed, but the selected components "
+            f"need about {human_bytes(needed_memory)} to run"
         )
+    checks.append(
+        SystemCheck("Memory", memory == 0 or memory >= needed_memory, memory_detail)
     )
+    if required_memory_bytes and memory:
+        checks.append(_swap_check(memory, required_memory_bytes, swap_total, swap_compressed))
 
     writable = True
     try:
@@ -118,20 +325,35 @@ def run_preflight(
     checks.append(SystemCheck("Data directory", writable, detail, blocking=True))
 
     available = free_bytes(config.database_root)
+    trustworthy = free_space_is_trustworthy(available, config.database_root)
     if required_bytes:
         # Reference data unpacks alongside its download, so ask for headroom.
         needed = int(required_bytes * 1.15)
-        checks.append(
-            SystemCheck(
-                "Disk space",
-                available >= needed,
-                f"{human_bytes(available)} free, about {human_bytes(needed)} needed",
-                blocking=True,
+        if trustworthy:
+            detail = f"{human_bytes(available)} free, about {human_bytes(needed)} needed"
+        else:
+            # Say so plainly rather than asserting a figure that cannot be
+            # stood behind.
+            detail = (
+                f"could not confirm free space on this filesystem "
+                f"(it reports {human_bytes(available)}); about {human_bytes(needed)} "
+                f"is needed - check the underlying disk before continuing"
             )
+        checks.append(
+            SystemCheck("Disk space", available >= needed, detail, blocking=True)
+        )
+    elif trustworthy:
+        checks.append(
+            SystemCheck("Disk space", True, f"{human_bytes(available)} free at {config.database_root}")
         )
     else:
         checks.append(
-            SystemCheck("Disk space", True, f"{human_bytes(available)} free at {config.database_root}")
+            SystemCheck(
+                "Disk space",
+                True,
+                f"reported {human_bytes(available)} free at {config.database_root}, "
+                f"which this filesystem cannot be relied on to confirm",
+            )
         )
 
     online = has_network(use_cache=use_network_cache)

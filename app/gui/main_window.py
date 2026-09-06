@@ -14,15 +14,19 @@ from PyQt6.QtWidgets import (
 )
 
 from backend.setup.manager import SetupManager
+from backend.execution.pipeline import default_stages
 from gui import theme
+from gui.navigation import check_pages_match
 from gui.pages.fastp_page import FastPPage
 from gui.pages.fastqc_page import FastQCPage
 from gui.pages.host_removal_page import HostRemovalPage
 from gui.pages.history_page import HistoryPage
+from gui.pages.metaphlan_page import MetaPhlAnPage
 from gui.pages.multiqc_page import MultiQCPage
 from gui.pages.pipeline_page import PipelinePage
 from gui.pages.setup_page import SetupPage
 from gui.widgets.sidebar import SidebarPanel
+from gui.widgets.workflow_ribbon import WorkflowRibbon
 from gui.widgets.status_badge import StatusBadge
 from gui.widgets.video_backdrop import BackgroundVideo
 
@@ -65,7 +69,11 @@ class MainWindow(QWidget):
         # A finished install makes new tools and references available immediately.
         setup_page.setup_changed.connect(host_removal_page._load_configured_index)
         pipeline_page = PipelinePage()
+        metaphlan_page = MetaPhlAnPage()
         setup_page.setup_changed.connect(pipeline_page.refresh_readiness)
+        # Installing the marker database makes profiling possible without a
+        # restart, so the page re-reads its state when setup finishes.
+        setup_page.setup_changed.connect(metaphlan_page.refresh_database_state)
         setup_page.setup_changed.connect(self.refresh_status_strip)
         self.page_by_name = {
             "Setup & Resources": setup_page,
@@ -74,8 +82,11 @@ class MainWindow(QWidget):
             "fastp": FastPPage(),
             "MultiQC": MultiQCPage(),
             "Host Removal": host_removal_page,
+            "MetaPhlAn": metaphlan_page,
             "Run History": HistoryPage(),
         }
+        # Fails here rather than as a navigation entry that does nothing.
+        check_pages_match(list(self.page_by_name))
         self.page_containers = {}
         for name, page in self.page_by_name.items():
             container = QScrollArea()
@@ -132,29 +143,19 @@ class MainWindow(QWidget):
         return header
 
     def _make_pipeline_summary(self) -> QWidget:
-        """A compact reminder of the workflow this application runs."""
-        frame = QFrame()
-        frame.setStyleSheet(
-            f"background: rgba(115, 66, 49, 0.55);"
-            f" border: 1px solid {theme.ACCENT_DEEP}; border-radius: 9px;"
-        )
-        row = QHBoxLayout(frame)
-        row.setContentsMargins(14, 8, 14, 8)
-        row.setSpacing(10)
-        for index, name in enumerate(("QC", "Trim", "Host", "Taxa", "Function", "Report")):
-            if index:
-                arrow = QLabel("›")
-                arrow.setStyleSheet(
-                    f"background: transparent; color: #E4C9A6; font-size: 13px;"
-                )
-                row.addWidget(arrow)
-            step = QLabel(name)
-            step.setStyleSheet(
-                f"background: transparent; color: {theme.CREAM_TEXT};"
-                f" font-size: 11px; font-weight: bold; letter-spacing: 1px;"
-            )
-            row.addWidget(step)
-        return frame
+        """A compact reminder of the workflow this application runs.
+
+        Derived from the stages this release actually offers, never a list of
+        its own: a hard-coded strip kept showing "Function" after functional
+        profiling was withheld, contradicting the pipeline row on the same
+        screen. Repeats collapse, so the two FastQC passes read as one "QC".
+        """
+        names: list[str] = []
+        for stage in default_stages():
+            label = stage.short_title
+            if label and label not in names:
+                names.append(label)
+        return WorkflowRibbon(names)
 
     def _note_background(self, playing: bool) -> None:
         """Record whether the animated background is running, for diagnostics."""
@@ -246,10 +247,22 @@ class MainWindow(QWidget):
             if answer != QMessageBox.StandardButton.Close:
                 event.ignore()
                 return
-        pipeline_page.shutdown()
-        setup_page.shutdown()
+        # Every page that can own a running process, not just these two: a tool
+        # started from one of the standalone pages would otherwise outlive the
+        # window, with its log file still open.
+        for page in self.page_by_name.values():
+            shutdown = getattr(page, "shutdown", None)
+            if callable(shutdown):
+                try:
+                    shutdown()
+                except Exception as error:  # noqa: BLE001 - closing must not fail
+                    print(f"BioFlow: error shutting down {type(page).__name__}: {error}")
         if getattr(self, "background", None) is not None:
             self.background.stop()
+        # The sidebar's reveal timer, stopped for the same reason as the video.
+        signature = getattr(self.sidebar_panel, "signature", None)
+        if signature is not None:
+            signature.stop()
         event.accept()
 
     def show_page(self, item, _column):

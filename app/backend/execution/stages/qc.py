@@ -26,6 +26,8 @@ class FastQCStage(Stage):
     """
 
     environment_key = "qc"
+    short_title = "QC"
+    chip_title = "FastQC"
 
     def __init__(self, key: str, title: str, source: str, directory: str):
         self.key = key
@@ -97,6 +99,8 @@ class MultiQCStage(Stage):
 
     key = "multiqc"
     title = "MultiQC report"
+    short_title = "Report"
+    chip_title = "MultiQC"
     environment_key = "qc"
     per_project = True
 

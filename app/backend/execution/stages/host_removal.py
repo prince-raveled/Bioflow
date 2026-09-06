@@ -50,6 +50,8 @@ class HostRemovalStage(Stage):
 
     key = "host_removal"
     title = "Host removal (Bowtie2)"
+    short_title = "Host"
+    chip_title = "Host"
     environment_key = "hostrem"
     required_databases = ("grch38",)
 

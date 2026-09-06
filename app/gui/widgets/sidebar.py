@@ -3,6 +3,8 @@ from PyQt6.QtGui import QBrush, QColor, QFont, QPalette
 from PyQt6.QtWidgets import QFrame, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 
 from gui import theme
+from gui.navigation import NAVIGATION
+from gui.widgets.author_signature import AuthorSignature
 from gui.widgets.nucleotide_loom import NucleotideLoom
 
 
@@ -30,36 +32,21 @@ class Sidebar(QTreeWidget):
         self.build_tree()
 
     def build_tree(self):
+        """Build the tree from the shared navigation structure.
 
-        setup = QTreeWidgetItem(["Setup"])
-        setup.addChild(QTreeWidgetItem(["Setup & Resources"]))
-        self.addTopLevelItem(setup)
+        The names are not repeated here: the window looks its pages up by the
+        text of the item that was clicked, so a name spelled differently in the
+        two places produces an entry that silently does nothing.
+        """
+        sections = []
+        for heading, pages in NAVIGATION:
+            section = QTreeWidgetItem([heading])
+            for name in pages:
+                section.addChild(QTreeWidgetItem([name]))
+            self.addTopLevelItem(section)
+            sections.append(section)
 
-        analysis = QTreeWidgetItem(["Analysis"])
-        analysis.addChild(QTreeWidgetItem(["Run workflow"]))
-        self.addTopLevelItem(analysis)
-
-        quality = QTreeWidgetItem(["Quality control"])
-
-        fastqc = QTreeWidgetItem(["FastQC"])
-        fastp = QTreeWidgetItem(["fastp"])
-        multiqc = QTreeWidgetItem(["MultiQC"])
-
-        quality.addChild(fastqc)
-        quality.addChild(fastp)
-        quality.addChild(multiqc)
-
-        self.addTopLevelItem(quality)
-
-        host_removal = QTreeWidgetItem(["Host removal"])
-        host_removal.addChild(QTreeWidgetItem(["Host Removal"]))
-        self.addTopLevelItem(host_removal)
-
-        history = QTreeWidgetItem(["History"])
-        history.addChild(QTreeWidgetItem(["Run History"]))
-        self.addTopLevelItem(history)
-
-        for section in (setup, analysis, quality, host_removal, history):
+        for section in sections:
             section.setFlags(section.flags() & ~Qt.ItemFlag.ItemIsSelectable)
             section_font = QFont(section.font(0))
             section_font.setBold(True)
@@ -70,9 +57,8 @@ class Sidebar(QTreeWidget):
             section.setBackground(0, QBrush(QColor(theme.ACCENT)))
             section.setForeground(0, QBrush(QColor(theme.CREAM_TEXT)))
 
-        for section in (setup, analysis, quality, host_removal, history):
+        for section in sections:
             section.setExpanded(True)
-        self.setCurrentItem(fastqc)
 
     def select(self, page_name: str) -> bool:
         """Highlight a page by name so the window can open on it at startup."""
@@ -107,3 +93,8 @@ class SidebarPanel(QWidget):
         self.accent = NucleotideLoom()
         self.accent.setFixedHeight(44)
         layout.addWidget(self.accent)
+
+        # The ribbon above is abstract; this is the same alphabet carrying
+        # something real. It stays collapsed to a single line until pressed.
+        self.signature = AuthorSignature()
+        layout.addWidget(self.signature)

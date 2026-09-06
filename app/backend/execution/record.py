@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 import hashlib
 import json
+import os
 
 
 class StageStatus(str, Enum):
@@ -112,6 +113,10 @@ class StageRecord:
     #: Identifies the inputs and commands this result was produced from, so a
     #: changed input or a changed command invalidates the checkpoint.
     fingerprint: str = ""
+    #: The state of the output files at the moment they were validated. Lets a
+    #: resume tell "these are the bytes I already checked" from "these look
+    #: about right", without decompressing gigabytes a second time.
+    output_fingerprint: str = ""
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -136,6 +141,7 @@ class StageRecord:
             started_at=data.get("started_at", ""),
             finished_at=data.get("finished_at", ""),
             fingerprint=data.get("fingerprint", ""),
+            output_fingerprint=data.get("output_fingerprint", ""),
         )
 
 
@@ -191,21 +197,29 @@ class PipelineRecord:
         return [record for record in self.stages if record.status is StageStatus.FAILED]
 
     def save(self, path: Path) -> None:
+        """Write the checkpoint, replacing any previous one atomically.
+
+        This is rewritten after every stage of a long run, so a crash or a power
+        loss lands in the middle of a write more often than the odds suggest.
+        Writing beside the target and renaming means the checkpoint on disk is
+        always a whole one, and a resume never has to discard good history
+        because the last write was cut short.
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "project_name": self.project_name,
-                    "started_at": self.started_at,
-                    "finished_at": self.finished_at,
-                    "status": self.status.value,
-                    "message": self.message,
-                    "stages": [record.to_dict() for record in self.stages],
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
+        payload = json.dumps(
+            {
+                "project_name": self.project_name,
+                "started_at": self.started_at,
+                "finished_at": self.finished_at,
+                "status": self.status.value,
+                "message": self.message,
+                "stages": [record.to_dict() for record in self.stages],
+            },
+            indent=2,
         )
+        temporary = path.with_name(path.name + ".partial")
+        temporary.write_text(payload, encoding="utf-8")
+        os.replace(temporary, path)
 
     @classmethod
     def load(cls, path: Path) -> "PipelineRecord | None":
@@ -215,16 +229,27 @@ class PipelineRecord:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+        # A checkpoint is an ordinary file on disk: it can be truncated by a
+        # power loss, edited by hand, or written by a different version of
+        # BioFlow. None of that may raise out of here, because the only caller
+        # is the start of a run and an exception there aborts the analysis
+        # before it begins. An unreadable checkpoint simply means no resume.
+        if not isinstance(data, dict):
+            return None
+        try:
+            status = StageStatus(data.get("status") or "pending")
+        except ValueError:
+            status = StageStatus.PENDING
         record = cls(
-            project_name=data.get("project_name", ""),
-            started_at=data.get("started_at", ""),
-            finished_at=data.get("finished_at", ""),
-            status=StageStatus(data.get("status", "pending")),
-            message=data.get("message", ""),
+            project_name=str(data.get("project_name", "")),
+            started_at=str(data.get("started_at", "")),
+            finished_at=str(data.get("finished_at", "")),
+            status=status,
+            message=str(data.get("message", "")),
         )
-        for entry in data.get("stages", []):
+        for entry in data.get("stages") or []:
             try:
                 record.stages.append(StageRecord.from_dict(entry))
-            except (KeyError, ValueError):
+            except (AttributeError, KeyError, TypeError, ValueError):
                 continue  # A malformed entry simply means that stage reruns.
         return record

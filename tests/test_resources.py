@@ -347,7 +347,13 @@ class StatusReportingTests(ResourceTestCase):
                       ResourceState.MISSING)
         directory = manager.database_directory(specs["metaphlan_chocophlan"])
         directory.mkdir(parents=True, exist_ok=True)
+        # A part-unpacked dataset is reported as incomplete rather than as
+        # ready to use, and equally not as absent: it is tens of gigabytes.
         (directory / "mpa_test.pkl").write_text("", encoding="utf-8")
+        self.assertIs(manager.database_state(specs["metaphlan_chocophlan"]).state,
+                      ResourceState.INCOMPLETE)
+        for pattern in specs["metaphlan_chocophlan"].required_globs:
+            (directory / pattern).write_text("", encoding="utf-8")
         self.assertIs(manager.database_state(specs["metaphlan_chocophlan"]).state,
                       ResourceState.MANAGED)
 

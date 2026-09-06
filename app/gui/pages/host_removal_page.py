@@ -7,7 +7,6 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -18,28 +17,35 @@ from PyQt6.QtWidgets import (
 
 from backend.config import get_config
 from backend.samples import (
+    FASTQ_EXTENSIONS,
     FASTQ_FILE_FILTER,
     ReadLayout,
     detect_samples,
     sample_name_for,
 )
-from backend.execution.stages.host_removal import gzip_output_argument
+from backend.execution.record import ValidationResult
+from backend.execution.stage import check_exists, check_gzip_readable
+from backend.execution.stages.host_removal import HostRemovalStage, gzip_output_argument
 from backend.setup.manager import BOWTIE2_INDEX_PARTS, bowtie2_index_is_complete
 from gui.widgets.status_badge import StatusBadge
 from gui.pages.qc_tool_page import QCToolPage
+from gui import dialogs
 
 
 class HostRemovalPage(QCToolPage):
     """Run Bowtie2 against GRCh38 and retain unmapped microbial reads."""
 
     def __init__(self):
-        super().__init__("Host Removal", environment_key="hostrem")
+        super().__init__(
+            "Host Removal", environment_key="hostrem", section="Host removal"
+        )
         self.paired_fastq_files: list[str] = []
         self.single_fastq_files: list[str] = []
         self.index_prefix: Path | None = None
         self._pending_jobs: list[tuple[str, list[str], Path]] = []
         self._completed_jobs = 0
         self._failed_jobs = 0
+        self._current_job = None
         self.description.setText(
             "Remove human reads with Bowtie2. Select read layout, GRCh38 index, and an output folder."
         )
@@ -47,7 +53,11 @@ class HostRemovalPage(QCToolPage):
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Read layout"))
         self.layout_choice = QComboBox()
-        self.layout_choice.addItems(["Paired-end", "Single-end"])
+        # Paired-end first: the common case for host removal. Labels come from
+        # the enum, and the enum comes back out of chosen_layout(), so the
+        # choice is never recovered by comparing display text.
+        for layout in (ReadLayout.PAIRED, ReadLayout.SINGLE):
+            self.layout_choice.addItem(layout.label, layout)
         self.layout_choice.currentIndexChanged.connect(self._change_layout)
         mode_row.addWidget(self.layout_choice)
         mode_row.addStretch()
@@ -107,26 +117,33 @@ class HostRemovalPage(QCToolPage):
         thread_row.addWidget(QLabel("Threads"))
         self.threads = QSlider(Qt.Orientation.Horizontal)
         self.threads.setRange(1, 32)
-        self.threads.setValue(8)
+        self.threads.setValue(self.default_thread_count())
         self.threads.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.threads.setTickInterval(4)
         self.threads.valueChanged.connect(self._show_thread_count)
         thread_row.addWidget(self.threads)
-        self.thread_count = QLabel("08")
+        self.thread_count = QLabel(self.thread_label(self.threads.value()))
         self.thread_count.setObjectName("threadCount")
         thread_row.addWidget(self.thread_count)
         self.controls.addLayout(thread_row)
         self.add_output_selector()
 
+    def chosen_layout(self) -> ReadLayout:
+        """The layout the user picked, as the enum rather than its label.
+
+        Reading it back by comparing the combo's text meant a change to the
+        label would silently turn every run single-end, with nothing on screen
+        to show that anything had changed.
+        """
+        return self.layout_choice.currentData()
+
     def _change_layout(self):
-        paired = self.layout_choice.currentText() == "Paired-end"
+        paired = self.chosen_layout() is ReadLayout.PAIRED
         self.paired_inputs.setVisible(paired)
         self.single_inputs.setVisible(not paired)
 
     def _select_paired_files(self):
-        files, _ = QFileDialog.getOpenFileNames(
-            self, "Select all paired-end FASTQ files", "", FASTQ_FILE_FILTER
-        )
+        files = dialogs.open_files(self, "Select all paired-end FASTQ files", FASTQ_FILE_FILTER)
         if not files:
             return
         self.paired_fastq_files = files
@@ -142,9 +159,7 @@ class HostRemovalPage(QCToolPage):
         self._set_default_output_from_files(files)
 
     def _select_single_files(self):
-        files, _ = QFileDialog.getOpenFileNames(
-            self, "Select single-end FASTQ files", "", FASTQ_FILE_FILTER
-        )
+        files = dialogs.open_files(self, "Select single-end FASTQ files", FASTQ_FILE_FILTER)
         if not files:
             return
         self.single_fastq_files = files
@@ -160,10 +175,9 @@ class HostRemovalPage(QCToolPage):
             )
 
     def _select_index_files(self):
-        file_names, _ = QFileDialog.getOpenFileNames(
+        file_names = dialogs.open_files(
             self,
             "Select all 6 GRCh38 Bowtie2 index files",
-            "",
             "Bowtie2 index (*.bt2 *.bt2l);;All files (*)",
         )
         if not file_names:
@@ -236,7 +250,7 @@ class HostRemovalPage(QCToolPage):
     @staticmethod
     def _sample_name(file_name: str) -> str:
         name = Path(file_name).name
-        for extension in (".fastq.gz", ".fq.gz", ".fastq", ".fq"):
+        for extension in FASTQ_EXTENSIONS:
             if name.endswith(extension):
                 name = name[:-len(extension)]
                 break
@@ -265,7 +279,7 @@ class HostRemovalPage(QCToolPage):
         self.thread_count.setText(f"{value:02d}")
 
     def run_analysis(self):
-        paired = self.layout_choice.currentText() == "Paired-end"
+        paired = self.chosen_layout() is ReadLayout.PAIRED
         if self.process is not None:
             self.add_log("Host Removal is already running.")
             return
@@ -303,7 +317,12 @@ class HostRemovalPage(QCToolPage):
                 unmapped = self.output_directory / f"{sample}_nohost.fastq.gz"
                 command.extend(["-U", read_1, "--un-gz", gzip_output_argument(unmapped)])
             command.extend(["-S", "/dev/null"])
-            self._pending_jobs.append((sample, command, log_file))
+            expected = (
+                [self.output_directory / f"{sample}_nohost_R{mate}.fastq.gz" for mate in (1, 2)]
+                if paired
+                else [self.output_directory / f"{sample}_nohost.fastq.gz"]
+            )
+            self._pending_jobs.append((sample, command, log_file, expected))
 
         self._completed_jobs = 0
         self._failed_jobs = 0
@@ -316,15 +335,52 @@ class HostRemovalPage(QCToolPage):
                 f"Batch complete: {self._completed_jobs} succeeded, {self._failed_jobs} failed."
             )
             return
-        sample, command, log_file = self._pending_jobs.pop(0)
+        sample, command, log_file, expected = self._pending_jobs.pop(0)
         position = self._completed_jobs + self._failed_jobs + 1
+        self._current_job = (sample, log_file, expected)
         self.add_log(f"Starting sample {position}: {sample}. Log: {log_file}")
         self.start_tool(command, stderr_log=log_file)
 
     def _process_finished(self, exit_code, exit_status):
         super()._process_finished(exit_code, exit_status)
-        if exit_code == 0:
-            self._completed_jobs += 1
-        else:
+        if exit_code != 0:
             self._failed_jobs += 1
+            self._current_job = None
+            self._start_next_job()
+            return
+        # Exit zero is necessary but not sufficient, which is the rule the
+        # pipeline stage applies to this very command: Bowtie2 can finish
+        # successfully having aligned nothing and written an empty file. Counting
+        # a job as succeeded on its status alone made this page report a clean
+        # batch for work the workflow would have failed.
+        problems = self._output_problems()
+        if problems:
+            self._failed_jobs += 1
+            self.add_log(f"Sample finished but its output is not usable: {problems}")
+            self.result_badge.set_state("FAILED", "error")
+            self.result_label.setText(problems)
+        else:
+            self._completed_jobs += 1
+        self._current_job = None
         self._start_next_job()
+
+    def _output_problems(self) -> str:
+        """Why the finished job's output is unusable, or "" when it is fine.
+
+        Uses the pipeline stage's own checks so the two paths cannot drift into
+        disagreeing about what a successful host removal looks like.
+        """
+        if self._current_job is None:
+            return ""
+        _sample, log_file, expected = self._current_job
+        result = ValidationResult()
+        for path in expected:
+            if check_exists(result, path, minimum_bytes=32):
+                check_gzip_readable(result, path)
+        if HostRemovalStage.alignment_rate(log_file) is None:
+            result.add(
+                "Bowtie2 reported an alignment rate",
+                False,
+                "no summary line in the log",
+            )
+        return "" if result.valid else result.summary()

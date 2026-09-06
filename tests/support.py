@@ -173,3 +173,40 @@ def isolate_bioflow_data_directory(test_case) -> Path:
     os.environ["BIOFLOW_DATA_DIR"] = temporary.name
     reload_config()
     return Path(temporary.name)
+
+
+def install_fake_environment(config, key: str) -> None:
+    """Create an environment prefix that looks genuinely complete.
+
+    BioFlow treats an environment as installed only when the tools it declares
+    are actually present, so a test that only makes `bin` is describing a
+    failed installation rather than a successful one.
+    """
+    from backend.setup.registry import environment_specs
+
+    binaries = config.environment_prefix(key) / "bin"
+    binaries.mkdir(parents=True, exist_ok=True)
+    spec = environment_specs().get(key)
+    for command in spec.verify_commands if spec else ():
+        (binaries / command[0]).write_bytes(b"")
+
+
+def enable_functional_profiling(test_case) -> None:
+    """Turn on the components this release withholds, for the duration of a test.
+
+    Functional profiling is gated out of the release but still fully present in
+    the codebase, so the tests that cover it enable it explicitly rather than
+    being deleted alongside the feature.
+    """
+    import os
+
+    previous = os.environ.get("BIOFLOW_ENABLE_FUNCTIONAL")
+
+    def restore():
+        if previous is None:
+            os.environ.pop("BIOFLOW_ENABLE_FUNCTIONAL", None)
+        else:
+            os.environ["BIOFLOW_ENABLE_FUNCTIONAL"] = previous
+
+    test_case.addCleanup(restore)
+    os.environ["BIOFLOW_ENABLE_FUNCTIONAL"] = "1"

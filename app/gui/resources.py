@@ -58,12 +58,3 @@ def background_video_path() -> Path | None:
                 return candidates[0]
     return None
 
-
-def asset_path(*parts: str | Path) -> Path | None:
-    """Return a bundled asset's path, or None when it is not present."""
-    relative = Path(*parts)
-    for root in _search_roots():
-        candidate = root / relative
-        if candidate.is_file():
-            return candidate
-    return None

@@ -39,7 +39,12 @@ class EnvironmentResolver:
         missing: list[str] = []
         if not self.manager.micromamba_installed():
             missing.append("micromamba")
-        if not self.config.environment_is_installed(environment_key):
+        # The manager's check, not the configuration's: a bare `bin` directory
+        # is left behind by an interrupted environment creation, and accepting
+        # it here let the run button enable itself for an environment the Setup
+        # page was simultaneously reporting as incomplete. The analysis then
+        # failed part-way through instead of before it started.
+        if not self.manager.environment_installed(environment_key):
             missing.append(f"{ENVIRONMENT_PREFIX}{environment_key}")
         specifications = database_specs()
         for database_key in databases:

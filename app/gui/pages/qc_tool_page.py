@@ -7,18 +7,20 @@ import shlex
 from PyQt6.QtCore import QProcess
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import QFrame, QFileDialog, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget
 
 from backend.config import get_config
 from backend.execution.environment import EnvironmentResolver, MissingBackend
+from backend.execution.runner import is_harmless_tool_noise
 from backend.history import RunHistory
 from gui.widgets.status_badge import StatusBadge
+from gui import dialogs
 
 
 class QCToolPage(QWidget):
     """Base page that runs one command without blocking the Qt interface."""
 
-    def __init__(self, tool_name: str, environment_key: str = "qc"):
+    def __init__(self, tool_name: str, environment_key: str = "qc", section: str = ""):
         super().__init__()
         self.tool_name = tool_name
         #: Key from backend.setup.registry; the name it maps to is configurable.
@@ -35,9 +37,13 @@ class QCToolPage(QWidget):
         self.layout.setContentsMargins(34, 30, 34, 30)
         self.layout.setSpacing(14)
 
-        eyebrow = QLabel("Quality control")
-        eyebrow.setObjectName("eyebrow")
-        self.layout.addWidget(eyebrow)
+        # The section this page belongs to. Passed in rather than fixed, because
+        # this base class is no longer only used by quality-control tools, and a
+        # page whose eyebrow names the wrong section contradicts the sidebar
+        # entry the user just clicked.
+        self.eyebrow = QLabel(section or "Quality control")
+        self.eyebrow.setObjectName("eyebrow")
+        self.layout.addWidget(self.eyebrow)
 
         title = QLabel(tool_name)
         title.setObjectName("pageTitle")
@@ -103,9 +109,7 @@ class QCToolPage(QWidget):
 
     def select_output_directory(self):
         initial_directory = str(self.output_directory or Path.cwd())
-        directory = QFileDialog.getExistingDirectory(
-            self, "Select output folder", initial_directory
-        )
+        directory = dialogs.existing_directory(self, "Select output folder", initial_directory)
         if directory:
             self.output_directory = Path(directory)
             self.output_selected_by_user = True
@@ -127,6 +131,26 @@ class QCToolPage(QWidget):
     def _open_results_directory(self):
         if self.output_directory and self.output_directory.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.output_directory)))
+
+    @staticmethod
+    def default_thread_count() -> int:
+        """Where a thread slider should start, from the user's configuration.
+
+        The tool pages each carried their own literal instead, so a
+        default_threads set in config.json was honoured on the workflow page and
+        ignored on every other one. Clamped as the workflow page clamps it, so
+        all four agree.
+        """
+        return max(1, min(8, get_config().default_threads))
+
+    @staticmethod
+    def thread_label(value: int) -> str:
+        """The slider's reading, derived rather than written out a second time.
+
+        The label was a separate literal from the value it described, so
+        changing one left the other showing the old number until the slider moved.
+        """
+        return f"{value:02d}"
 
     def _resolve_command(self, command: list[str]) -> tuple[str, list[str]]:
         """Resolve strictly against BioFlow's own managed environment.
@@ -189,22 +213,28 @@ class QCToolPage(QWidget):
 
     @staticmethod
     def _clean_tool_output(output: str) -> str:
-        """Hide known harmless launcher fallbacks while retaining real diagnostics."""
-        ignored_lines = {
-            "[WARNING] Failed to launch x86-64-v3 version, staying with default",
-        }
+        """Hide known harmless launcher fallbacks while retaining real diagnostics.
+
+        Shares one definition of "harmless" with the pipeline runner, so the
+        standalone pages and Run workflow present tool output identically.
+        """
         return "\n".join(
-            line for line in output.splitlines() if line.strip() not in ignored_lines
+            line for line in output.splitlines() if not is_harmless_tool_noise(line)
         )
 
     def _process_error(self, error):
-        if self.process:
-            self.add_log(f"Process error: {self.process.errorString()}")
-            if error == QProcess.ProcessError.FailedToStart:
-                RunHistory.finish_run(self._history_run_id, "failed", None)
-                self._close_execution_log()
-                self.process = None
-                self._set_running(False)
+        if not self.process:
+            return
+        self.add_log(f"Process error: {self.process.errorString()}")
+        # A crash is followed by finished(), which does the tidying. Every other
+        # error is terminal and emits nothing further, so the page would be left
+        # showing "running" for the rest of the session.
+        if error is not QProcess.ProcessError.Crashed:
+            RunHistory.finish_run(self._history_run_id, "failed", None)
+            self._history_run_id = None
+            self.result_badge.set_state("FAILED", "error")
+            self.result_label.setText(self.process.errorString())
+            self._release_process()
 
     def _process_finished(self, exit_code, _exit_status):
         self._read_stdout()
@@ -222,9 +252,36 @@ class QCToolPage(QWidget):
             self._history_run_id, "completed" if exit_code == 0 else "failed", exit_code
         )
         self._history_run_id = None
+        self._release_process()
+
+    def _release_process(self) -> None:
+        """Finish with the current process and let Qt destroy it.
+
+        The process is parented to this page, so clearing the attribute drops
+        only the Python reference: the C++ object stays a child of the page and
+        one accumulates per run for the lifetime of the window. deleteLater()
+        is what actually ends it.
+        """
         self._close_execution_log()
+        process = self.process
         self.process = None
+        if process is not None:
+            process.deleteLater()
         self._set_running(False)
+
+    def shutdown(self) -> None:
+        """Stop any running tool and release its resources.
+
+        Called when the window closes, so a tool started here does not outlive
+        the application and its log file is closed rather than abandoned.
+        """
+        process = self.process
+        if process is not None and process.state() is not QProcess.ProcessState.NotRunning:
+            process.kill()
+            process.waitForFinished(5000)
+            RunHistory.finish_run(self._history_run_id, "failed", None)
+            self._history_run_id = None
+        self._release_process()
 
     def _default_log_path(self) -> Path | None:
         if self.output_directory is None:

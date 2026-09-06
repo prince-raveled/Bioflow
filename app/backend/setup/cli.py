@@ -45,15 +45,23 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     print(
-        f"Plan: {len(plan)} step(s), about {human_bytes(plan.estimated_bytes)} "
-        f"— {', '.join(plan.components)}"
+        f"Plan: {len(plan)} step(s), "
+        f"{human_bytes(manager.estimated_download_bytes(list(arguments.install)))} to download, "
+        f"needs {human_bytes(manager.estimated_peak_bytes(list(arguments.install)))} free while "
+        f"installing — {', '.join(plan.components)}"
     )
     for index, step in enumerate(plan.steps, start=1):
         print(f"  {index:>2}. {step.title}")
     if arguments.dry_run:
         return 0
 
-    failures = blocking_failures(run_preflight(manager.config, plan.estimated_bytes))
+    failures = blocking_failures(
+        run_preflight(
+            manager.config,
+            manager.estimated_peak_bytes(list(arguments.install)),
+            required_memory_bytes=manager.required_memory_bytes(list(arguments.install)),
+        )
+    )
     if failures:
         for failure in failures:
             print(f"Cannot start setup — {failure.name}: {failure.detail}", file=sys.stderr)
@@ -62,7 +70,29 @@ def main(argv: list[str] | None = None) -> int:
     def announce(step, index, total):
         print(f"\n[{index}/{total}] {step.title}", flush=True)
 
-    executor = PlanExecutor(plan, on_step=announce, on_output=lambda line: print(line, flush=True))
+    interactive = sys.stdout.isatty()
+    state = {"width": 0}
+
+    def write_line(line):
+        # Clear any progress line still on screen before printing over it.
+        if state["width"]:
+            print("\r" + " " * state["width"] + "\r", end="")
+            state["width"] = 0
+        print(line, flush=True)
+
+    def show_transfer(update):
+        if not interactive:
+            # Redirected output gets one line per update rather than a redraw
+            # that would fill a log file with control characters.
+            print(update.text, flush=True)
+            return
+        padding = max(0, state["width"] - len(update.text))
+        print("\r" + update.text + " " * padding, end="", flush=True)
+        state["width"] = len(update.text)
+
+    executor = PlanExecutor(
+        plan, on_step=announce, on_output=write_line, on_progress=show_transfer
+    )
     succeeded, message = executor.run()
     print(f"\n{message}")
     return 0 if succeeded else 1

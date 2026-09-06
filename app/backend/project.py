@@ -40,6 +40,10 @@ class Project:
             host_index_prefix=resolved.grch38_index_prefix,
             metaphlan_database=resolved.metaphlan_database_directory,
             metaphlan_index=METAPHLAN_INDEX,
+            bowtie2_memory_mapped_shim=resolved.bowtie2_memory_mapped_shim,
+            micromamba_binary=resolved.micromamba_binary,
+            micromamba_root=resolved.micromamba_root,
+            taxonomy_environment=resolved.environment_name("taxonomy"),
         )
 
     # ------------------------------------------------------------------
@@ -90,6 +94,7 @@ class Project:
             "stage_keys": self.stage_keys,
             "options": {
                 "threads": self.options.threads,
+                "metaphlan_subsample_pairs": self.options.metaphlan_subsample_pairs,
                 "humann_protein_only": self.options.humann_protein_only,
                 "humann_normalise": self.options.humann_normalise,
             },
@@ -139,6 +144,11 @@ class Project:
             layout=ReadLayout(payload.get("layout", "single")),
             options=RunOptions(
                 threads=int(stored.get("threads", 4)),
+                metaphlan_subsample_pairs=(
+                    int(stored["metaphlan_subsample_pairs"])
+                    if stored.get("metaphlan_subsample_pairs")
+                    else None
+                ),
                 humann_protein_only=bool(stored.get("humann_protein_only", True)),
                 humann_normalise=bool(stored.get("humann_normalise", True)),
             ),

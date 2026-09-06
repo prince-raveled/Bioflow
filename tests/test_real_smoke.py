@@ -7,15 +7,17 @@ still passes on a machine that has not run Setup yet.
 
 from pathlib import Path
 import tempfile
+import os
 import unittest
 
 import support  # noqa: F401  (puts app/ on the path)
 from backend.config import bowtie2_index_is_complete, get_config, reload_config  # noqa: E402
 from backend.execution.pipeline import PipelineExecutor, stages_by_key  # noqa: E402
 from backend.execution.record import StageStatus  # noqa: E402
-from backend.execution.stage import RunOptions  # noqa: E402
+from backend.execution.stage import RunContext, RunOptions  # noqa: E402
+from backend.execution.workspace import Workspace  # noqa: E402
 from backend.project import Project  # noqa: E402
-from backend.samples import ReadLayout  # noqa: E402
+from backend.samples import ReadLayout, Sample  # noqa: E402
 from support import write_fastq  # noqa: E402
 
 
@@ -268,6 +270,58 @@ class RealHostRemovalTests(unittest.TestCase):
         rate = HostRemovalStage.alignment_rate(workspace.bowtie2_log(sample))
         self.assertIsNotNone(rate, "Bowtie2 did not report an alignment rate")
 
+    def test_paired_end_output_is_named_exactly_as_metaphlan_expects(self):
+        """The handoff from host removal to taxonomic profiling, run for real.
+
+        Bowtie2 does not take the two output names: it takes one --un-conc-gz
+        template and substitutes the mate number into a "%". Whether that lands
+        on the names the next stage reads is a property of Bowtie2's behaviour,
+        not of anything this codebase can assert on its own, so it is checked
+        here against the real aligner. Only single-end was covered before.
+        """
+        import gzip
+
+        workspace, sample, context = self._paired_workspace()
+
+        for target in workspace.trimmed_reads(sample):
+            with gzip.open(target, "wt") as handle:
+                for index in range(400):
+                    handle.write(f"@read{index}\n{'ACGTTGCA' * 18}\n+\n{'I' * 144}\n")
+
+        stage = stages_by_key()["host_removal"]
+        outcome = PipelineExecutor(context, [stage], on_log=lambda _m: None).run([sample])
+        self.assertTrue(outcome.succeeded, outcome.message)
+
+        declared = set(stage.outputs(sample, context))
+        written = {path for path in workspace.host_removed.iterdir()}
+        self.assertEqual(
+            declared,
+            written,
+            "Bowtie2 wrote different files from the ones the stage declared",
+        )
+        for path in stages_by_key()["metaphlan"].inputs(sample, context):
+            self.assertTrue(
+                path.is_file(),
+                f"taxonomic profiling would look for {path.name}, which was not written",
+            )
+
+    def _paired_workspace(self):
+        resolved = get_config().resolve_grch38_index()
+        workspace = Workspace(self.root / "paired")
+        workspace.create()
+        sample = Sample(
+            "pairsample",
+            ReadLayout.PAIRED,
+            self.root / "pairsample_R1.fastq.gz",
+            self.root / "pairsample_R2.fastq.gz",
+        )
+        context = RunContext(
+            workspace=workspace,
+            options=RunOptions(threads=2),
+            host_index_prefix=resolved.prefix,
+        )
+        return workspace, sample, context
+
     def test_running_never_writes_into_the_managed_store_when_external(self):
         from backend.config import ResourceState, get_config
 
@@ -279,4 +333,119 @@ class RealHostRemovalTests(unittest.TestCase):
         self.assertFalse(
             bowtie2_index_is_complete(managed),
             "an external reference must not have populated the managed store",
+        )
+
+
+#: Resident memory `bowtie2-align-l` needs for the ChocoPhlAn index. Measured
+#: from an OOM kill that reported 9,786,628 kB of anonymous memory, rounded up.
+METAPHLAN_MEMORY_BYTES = 10 * 1024 ** 3
+
+
+def available_memory_bytes() -> int:
+    """Memory actually free for a new process, or 0 when it cannot be read.
+
+    Deliberately MemAvailable rather than MemTotal: a machine with enough RAM
+    installed can still be unable to spare it, and an alignment that is killed
+    part-way through takes unrelated processes down with it.
+    """
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return 0
+    return 0
+
+
+def metaphlan_ready() -> bool:
+    """True when both the taxonomy environment and its database are installed."""
+    from backend.setup.manager import SetupManager
+    from backend.setup.registry import database_specs
+
+    config = reload_config()
+    if not (config.micromamba_binary.is_file() and config.environment_is_installed("taxonomy")):
+        return False
+    return SetupManager(config).managed_database_present(
+        database_specs()["metaphlan_chocophlan"]
+    )
+
+
+def metaphlan_has_memory() -> bool:
+    """True when there is room to align without provoking the OOM killer.
+
+    Honours BIOFLOW_SKIP_HEAVY_TESTS so a developer sharing the machine with an
+    editor can run the suite without a 10 GB alignment evicting it.
+    """
+    if os.environ.get("BIOFLOW_SKIP_HEAVY_TESTS"):
+        return False
+    available = available_memory_bytes()
+    return available == 0 or available >= METAPHLAN_MEMORY_BYTES
+
+
+@unittest.skipUnless(
+    metaphlan_ready(),
+    "the MetaPhlAn environment or its marker database is not installed",
+)
+@unittest.skipUnless(
+    metaphlan_has_memory(),
+    "less than 10 GB of memory is available; profiling would be killed",
+)
+class RealMetaPhlAnTests(unittest.TestCase):
+    """Profiles reads for real, offline, against the installed marker database.
+
+    Skipped unless the ~33 GB database is present, so the suite still runs on a
+    machine that has not installed it.
+    """
+
+    def setUp(self):
+        self._temporary = tempfile.TemporaryDirectory(prefix="bioflow-mpa-real-")
+        self.root = Path(self._temporary.name)
+        self.addCleanup(self._temporary.cleanup)
+
+    def _project(self, files, layout):
+        project, problems = Project.from_files(
+            "real-metaphlan", self.root / "run", files,
+            layout=layout, options=RunOptions(threads=4),
+        )
+        self.assertEqual(problems, [])
+        return project
+
+    def test_single_end_profiling_produces_a_usable_profile(self):
+        from backend.execution.pipeline import PipelineExecutor
+        from backend.execution.stage import RunOptions as Options  # noqa: F401
+
+        reads = write_fastq(self.root / "input" / "sample.fastq.gz", records=2000)
+        project = self._project([reads], ReadLayout.SINGLE)
+        sample = project.samples[0]
+
+        # Host removal is not installed everywhere, so feed MetaPhlAn directly
+        # by placing the reads where the stage expects to find them.
+        workspace = project.workspace
+        workspace.create()
+        target = workspace.host_removed_reads(sample)[0]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(reads.read_bytes())
+
+        stage = stages_by_key()["metaphlan"]
+        outcome = PipelineExecutor(
+            project.context(), [stage], on_log=lambda _m: None
+        ).run([sample])
+
+        self.assertTrue(outcome.succeeded, outcome.message)
+        profile = workspace.taxonomic_profile(sample)
+        self.assertTrue(profile.is_file())
+        text = profile.read_text(encoding="utf-8")
+        # MetaPhlAn always writes its provenance header naming the index used.
+        self.assertIn("mpa_vJan25", text)
+
+    def test_the_command_runs_offline_against_the_managed_database(self):
+        from backend.config import get_config
+
+        config = get_config()
+        sample = Sample("s", ReadLayout.SINGLE, self.root / "s.fastq.gz")
+        project = Project(name="x", root=self.root / "run")
+        command = stages_by_key()["metaphlan"].commands(sample, project.context())[0].command
+        self.assertIn("--offline", command)
+        self.assertEqual(
+            command[command.index("--db_dir") + 1], str(config.metaphlan_database_directory)
         )
