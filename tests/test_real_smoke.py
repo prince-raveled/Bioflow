@@ -163,10 +163,32 @@ class RealGuiDrivenRunTests(unittest.TestCase):
         cls.application = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        import os
+
+        from backend.config import reload_config
+
         self._temporary = tempfile.TemporaryDirectory(prefix="bioflow-gui-real-")
         self.root = Path(self._temporary.name)
 
+        # This test needs the real installation - real tools, the real GRCh38
+        # index - which is the whole point of it. It does not need, and must
+        # not have, the developer's real run history: driving the workflow page
+        # records a run the way pressing the button does, and every suite run
+        # was appending a row to the history a person actually reads.
+        self._saved_history = os.environ.get("BIOFLOW_HISTORY_DB")
+        os.environ["BIOFLOW_HISTORY_DB"] = str(self.root / "history.sqlite3")
+        reload_config()
+
     def tearDown(self):
+        import os
+
+        from backend.config import reload_config
+
+        if self._saved_history is None:
+            os.environ.pop("BIOFLOW_HISTORY_DB", None)
+        else:
+            os.environ["BIOFLOW_HISTORY_DB"] = self._saved_history
+        reload_config()
         self._temporary.cleanup()
 
     def test_a_paired_end_analysis_runs_from_the_page(self):
