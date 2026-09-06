@@ -258,11 +258,38 @@ class RefusedPathTests(ResolverTestCase):
             with self.subTest(path=path):
                 self.assertFalse(container.is_system_path(Path(path)))
 
-    def test_data_at_a_system_path_fails_with_an_explanation(self):
+    def test_a_system_path_in_the_command_is_skipped_not_refused(self):
+        """These two cases look alike and must be treated differently.
+
+        A system path named in the command refers to the container's own
+        filesystem - /tmp is the tmpfs it was given, /usr/bin/python is the
+        image's interpreter. Mounting the host over either would be wrong, and
+        refusing the run because a command mentions one would be wrong too.
+        """
         made = resolver(self.root)
-        with mock.patch.object(container, "mountable_ancestor", return_value=Path("/usr")):
-            with self.assertRaises(MissingBackend) as raised:
-                made.mount_plan(["fastqc", "/usr/reads.fastq.gz"])
+        plan = made.mount_plan([
+            "python", "-c", "pass",
+            "/tmp/scratch/work", "/usr/bin/python", "/etc/hosts",
+        ])
+        for path in plan.read_only + plan.writable:
+            self.assertFalse(
+                container.is_system_path(path), f"{path} should not be mounted"
+            )
+
+    def test_a_command_naming_only_system_paths_still_resolves(self):
+        made = resolver(self.root)
+        with _Ready():
+            _program, arguments = made.resolve("qc", ["python", "-c", "open('/tmp/x','w')"])
+        self.assertIn("run", arguments)
+
+    def test_data_at_a_system_path_fails_with_an_explanation(self):
+        # The fatal case: the user's results directory really is at /usr, so
+        # there is nowhere to write and mounting over it would replace the
+        # analysis tools.
+        made = resolver(self.root)
+        made.context.workspace = Workspace(Path("/usr"))
+        with self.assertRaises(MissingBackend) as raised:
+            made.mount_plan(["fastqc", "--outdir", "/usr"])
         self.assertIn("/usr", str(raised.exception))
         self.assertIn("run natively", str(raised.exception))
 

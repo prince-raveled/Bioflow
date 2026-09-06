@@ -324,20 +324,10 @@ class ContainerResolver:
                 if directory:
                     read_only.add(directory)
 
-        for path in self.paths_in(command):
-            directory = mountable_ancestor(path)
-            if directory is None:
-                continue
-            if any(directory == item or item in directory.parents for item in writable):
-                continue
-            read_only.add(directory)
-
-        read_only -= writable
-        plan = MountPlan(
-            read_only=collapse(read_only - writable),
-            writable=collapse(writable),
-        )
-        for path in plan.read_only + plan.writable:
+        # A root that lands on a system path is fatal: the user's data really
+        # is somewhere it cannot be reached from, and mounting over /usr would
+        # replace the analysis tools with whatever the host keeps there.
+        for path in read_only | writable:
             if is_system_path(path):
                 raise MissingBackend(
                     message=(
@@ -349,7 +339,25 @@ class ContainerResolver:
                     ),
                     components=[],
                 )
-        return plan
+
+        # A system path named in the command itself is a different thing: it
+        # refers to the container's own filesystem, which is already there.
+        # /tmp is the tmpfs the container was given, /usr/bin/python is the
+        # image's interpreter. Mounting the host over either would be wrong,
+        # and refusing the run over it would be wrong too - so they are simply
+        # not mounted.
+        for path in self.paths_in(command):
+            directory = mountable_ancestor(path)
+            if directory is None or is_system_path(directory):
+                continue
+            if any(directory == item or item in directory.parents for item in writable):
+                continue
+            read_only.add(directory)
+
+        return MountPlan(
+            read_only=collapse(read_only - writable),
+            writable=collapse(writable),
+        )
 
     # ------------------------------------------------------------------
     def security_arguments(self) -> list[str]:
