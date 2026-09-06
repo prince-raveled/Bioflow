@@ -297,6 +297,28 @@ class BioFlowConfig:
         self.external_grch38_index = prefix
         self.save()
 
+    def set_execution_backend(self, backend: str) -> None:
+        """Record which backend runs analysis commands.
+
+        Raises ValueError for anything unrecognised, so a typo cannot be saved
+        as a backend that does not exist and then silently fall back at run time.
+        """
+        if backend not in EXECUTION_BACKENDS:
+            raise ValueError(
+                f"{backend!r} is not an execution backend "
+                f"({', '.join(EXECUTION_BACKENDS)})."
+            )
+        self.execution_backend = backend
+        self.save()
+
+    def set_container_image(self, image: str) -> None:
+        """Record which analysis image container execution should use."""
+        image = image.strip()
+        if not image:
+            raise ValueError("An image reference cannot be empty.")
+        self.container_image = image
+        self.save()
+
     @property
     def bowtie2_executable(self) -> Path:
         """Bowtie2 inside the taxonomy environment, which MetaPhlAn drives."""

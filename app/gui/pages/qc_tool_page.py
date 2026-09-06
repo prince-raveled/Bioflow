@@ -10,6 +10,7 @@ from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget
 
 from backend.config import get_config
+from backend.execution.backends import resolver_for
 from backend.execution.environment import EnvironmentResolver, MissingBackend
 from backend.execution.runner import is_harmless_tool_noise
 from backend.execution.stage import RunContext, RunOptions
@@ -171,15 +172,28 @@ class QCToolPage(QWidget):
         """
         return f"{value:02d}"
 
+    def run_context(self, output_directory: Path | None = None) -> RunContext:
+        """The context this page's commands are built and resolved against."""
+        return tool_context(output_directory or self.output_directory or Path.cwd(), 1)
+
     def _resolve_command(self, command: list[str]) -> tuple[str, list[str]]:
-        """Resolve strictly against BioFlow's own managed environment.
+        """Resolve strictly against the backend BioFlow is configured to use.
 
         There is deliberately no fallback to a tool on PATH, to a system
         Micromamba, or to `conda run`: a result must be traceable to the
         environment BioFlow installed. A missing backend raises MissingBackend,
         which names the component to install.
+
+        The standalone pages follow the same setting as the workflow, so a
+        person who has chosen container execution gets it everywhere rather
+        than only where the pipeline runs. The resolver is chosen the same way
+        in both places, so the two cannot drift.
         """
-        return EnvironmentResolver(get_config()).resolve(self.environment_key, command)
+        config = get_config()
+        context = self.run_context()
+        # Mounts are derived from the command, and a standalone page writes
+        # wherever the user chose, so the context carries that directory.
+        return resolver_for(context, config=config).resolve(self.environment_key, command)
 
     def start_tool(self, command: list[str], stderr_log: Path | None = None):
         """Run a tool inside BioFlow's managed environment for it."""

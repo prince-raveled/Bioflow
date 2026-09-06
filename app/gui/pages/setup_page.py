@@ -5,8 +5,10 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QProgressBar,
     QPushButton,
@@ -15,6 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from backend.execution.container import ContainerResolver, detect_runtime
 from backend.config import ResourceState, bowtie2_index_prefix_from_file, get_config
 from backend.logger import SessionLog
 from backend.setup.bootstrap import human_bytes
@@ -212,6 +215,7 @@ class SetupPage(QWidget):
         layout.addLayout(self.components_layout)
         self._build_component_rows()
 
+        layout.addWidget(self._build_execution_row())
         layout.addWidget(self._build_reference_row())
 
         self.summary_label = QLabel()
@@ -291,6 +295,132 @@ class SetupPage(QWidget):
         self.clear_reference.clicked.connect(self.clear_external_index)
         row.addWidget(self.clear_reference)
         return frame
+
+    def _build_execution_row(self) -> QFrame:
+        """Where analysis tools run: on this machine, or in a container.
+
+        Deliberately one control. Native is the default and needs nothing
+        installed beyond BioFlow itself; container execution is for people who
+        want the tools frozen, and it is worth being able to choose without
+        having to learn anything about containers to do it.
+
+        "Container" rather than "Docker": the image is OCI and runs under
+        Podman or Docker, and naming one of them would suggest the other will
+        not work.
+        """
+        frame = QFrame()
+        frame.setObjectName("componentRow")
+        row = QHBoxLayout(frame)
+        row.setContentsMargins(12, 8, 12, 8)
+        row.setSpacing(10)
+
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        title = QLabel("Analysis environment")
+        title.setObjectName("componentTitle")
+        text.addWidget(title)
+        self.execution_label = QLabel()
+        self.execution_label.setObjectName("componentDescription")
+        self.execution_label.setWordWrap(True)
+        text.addWidget(self.execution_label)
+        row.addLayout(text, 1)
+
+        self.execution_choice = QComboBox()
+        self.execution_choice.addItem("On this machine", "native")
+        self.execution_choice.addItem("In a container", "container")
+        self.execution_choice.currentIndexChanged.connect(self.select_execution_backend)
+        row.addWidget(self.execution_choice)
+
+        self.choose_image = QPushButton("Image...")
+        self.choose_image.clicked.connect(self.select_container_image)
+        row.addWidget(self.choose_image)
+        return frame
+
+    def _refresh_execution_row(self) -> None:
+        backend = self.config.execution_backend
+        index = self.execution_choice.findData(backend)
+        if index >= 0 and self.execution_choice.currentIndex() != index:
+            # Set without re-entering the handler, which would save on every
+            # refresh and log a change nobody made.
+            self.execution_choice.blockSignals(True)
+            self.execution_choice.setCurrentIndex(index)
+            self.execution_choice.blockSignals(False)
+
+        runtime = detect_runtime()
+        if backend == "native":
+            detail = (
+                "Tools run in BioFlow's own environments on this machine. "
+                "Nothing else needs installing."
+            )
+            if runtime:
+                detail += f"  •  {runtime.title()} is available if you want containers."
+        elif runtime is None:
+            detail = (
+                "Container execution is selected, but no container runtime is "
+                "installed. Install Podman, or switch back to running on this "
+                "machine."
+            )
+        else:
+            resolver = ContainerResolver(config=self.config, image=self.config.container_image)
+            if resolver.image_present():
+                detail = (
+                    f"Tools run in {self.config.container_image} using "
+                    f"{runtime.title()}.  •  Image available."
+                )
+            else:
+                detail = (
+                    f"{runtime.title()} is installed, but the image "
+                    f"{self.config.container_image} is not available. Build it "
+                    f"with docker/build.sh, or choose another."
+                )
+        # Reference data is mounted from this machine either way, so what the
+        # component list below says about databases applies to both backends.
+        detail += "  •  Reference databases are used from this machine in both."
+        self.execution_label.setText(detail)
+        self.choose_image.setEnabled(backend == "container")
+
+    def select_execution_backend(self) -> None:
+        chosen = self.execution_choice.currentData()
+        if not chosen or chosen == self.config.execution_backend:
+            return
+        try:
+            self.config.set_execution_backend(chosen)
+        except ValueError as error:
+            self.add_log(str(error))
+            return
+        if chosen == "container":
+            runtime = detect_runtime()
+            if runtime is None:
+                self.add_log(
+                    "Container execution selected, but no container runtime was "
+                    "found. Install Podman, or switch back to running on this "
+                    "machine."
+                )
+            else:
+                self.add_log(
+                    f"Container execution selected. {runtime.title()} will run "
+                    f"{self.config.container_image}."
+                )
+        else:
+            self.add_log("Analysis will run in BioFlow's own environments on this machine.")
+        self.refresh()
+        self.setup_changed.emit()
+
+    def select_container_image(self) -> None:
+        current = self.config.container_image
+        chosen, accepted = QInputDialog.getText(
+            self, "Analysis image", "Image reference:", text=current
+        )
+        if not accepted:
+            return
+        try:
+            self.config.set_container_image(chosen)
+        except ValueError as error:
+            self.add_log(str(error))
+            return
+        self.add_log(f"Analysis image set to {self.config.container_image}.")
+        self.refresh()
+        self.setup_changed.emit()
 
     def _refresh_reference_row(self) -> None:
         resolved = self.config.resolve_grch38_index()
@@ -374,6 +504,7 @@ class SetupPage(QWidget):
             f"Backend location: {self.config.data_root}\n"
             f"Reference data: {self.config.database_root}"
         )
+        self._refresh_execution_row()
         self._refresh_reference_row()
         self._update_summary()
 
