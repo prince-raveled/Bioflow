@@ -5,6 +5,10 @@ import os
 import stat as stat_module
 
 from backend.execution.record import ValidationResult
+from backend.resources import (
+    available_memory_bytes as detect_available_memory,
+    memory_limit_bytes,
+)
 from backend.execution.stage import (
     LogCallback,
     RunContext,
@@ -70,14 +74,15 @@ def should_memory_map(total_memory: int | None = None) -> bool:
 
 
 def total_memory_bytes() -> int:
-    """Installed RAM, or 0 when it cannot be determined."""
-    try:
-        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
-            if line.startswith("MemTotal:"):
-                return int(line.split()[1]) * 1024
-    except (OSError, ValueError, IndexError):
-        return 0
-    return 0
+    """Memory this run may use, or 0 when it cannot be determined.
+
+    Installed RAM on an ordinary desktop, which is what this always used to
+    report. Where a cgroup caps the process - what a container does - that cap
+    wins, because `/proc/meminfo` inside a container describes the host and not
+    the confinement: believing it would choose to load a 33 GB index into a
+    cgroup that kills for trying.
+    """
+    return memory_limit_bytes()
 
 
 #: What MetaPhlAn's own process needs before a single read is aligned. The
@@ -89,14 +94,12 @@ MARKER_TABLE_BYTES = 7 * 1024 ** 3
 
 
 def available_memory_bytes() -> int:
-    """Memory free for a new process, or 0 when it cannot be read."""
-    try:
-        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
-            if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) * 1024
-    except (OSError, ValueError, IndexError):
-        return 0
-    return 0
+    """Memory free for a new process, or 0 when it cannot be read.
+
+    Delegated, so this and preflight cannot disagree: they answered the same
+    question with two separate implementations, and neither saw a cgroup.
+    """
+    return detect_available_memory()
 
 
 def out_of_memory_penalty() -> int:
@@ -256,9 +259,9 @@ class MetaPhlAnStage(Stage):
         """Put the memory-mapped Bowtie2 shim in place before profiling."""
         if context.bowtie2_memory_mapped_shim is None or context.micromamba_binary is None:
             return
-        if not should_memory_map():
+        if not should_memory_map(context.total_memory()):
             log(
-                f"This machine has {total_memory_bytes() / 1024 ** 3:.0f} GB of memory, "
+                f"This machine has {context.total_memory() / 1024 ** 3:.0f} GB of memory, "
                 f"so Bowtie2 will load the index rather than memory-map it. That is "
                 f"far faster: mapping is only worth its cost where the index cannot fit."
             )
@@ -271,7 +274,7 @@ class MetaPhlAnStage(Stage):
         )
         log(
             f"Bowtie2 will memory-map the index, through {shim}. This machine has "
-            f"{total_memory_bytes() / 1024 ** 3:.0f} GB of memory and the index is "
+            f"{context.total_memory() / 1024 ** 3:.0f} GB of memory and the index is "
             f"33 GB, so loading it outright would be killed."
         )
         # Said before the run rather than after it dies. MetaPhlAn spends its
@@ -296,7 +299,7 @@ class MetaPhlAnStage(Stage):
         exist, and threads do what threads are supposed to do.
         """
         requested = max(1, int(context.threads))
-        if should_memory_map():
+        if should_memory_map(context.total_memory()):
             return str(min(requested, MAXIMUM_THREADS))
         return str(requested)
 
@@ -363,7 +366,9 @@ class MetaPhlAnStage(Stage):
         # Only where the index has to be mapped. Pointing MetaPhlAn at the shim
         # on a machine with room to load the index would cost far more than it
         # saves - see MEMORY_MAPPING_THRESHOLD_BYTES.
-        if context.bowtie2_memory_mapped_shim is not None and should_memory_map():
+        if context.bowtie2_memory_mapped_shim is not None and should_memory_map(
+            context.total_memory()
+        ):
             command += ["--bowtie2_exe", str(context.bowtie2_memory_mapped_shim)]
 
         command += [

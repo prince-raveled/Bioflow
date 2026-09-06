@@ -276,7 +276,9 @@ class PipelineExecutor:
 
         stage_record.outputs = [str(path) for path in stage.outputs(sample, self.context)]
         stage_record.fingerprint = fingerprint_for(
-            [command.command for command in planned], stage.inputs(sample, self.context)
+            [command.command for command in planned],
+            stage.inputs(sample, self.context),
+            self.context.execution_identity,
         )
 
         if resume and self._can_skip(stage, sample, stage_record.fingerprint, previous):

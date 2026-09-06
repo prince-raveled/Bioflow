@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 
 from backend.config import METAPHLAN_INDEX, BioFlowConfig, get_config
+from backend.resources import memory_limit_bytes
 from backend.execution.stage import RunContext, RunOptions
 from backend.execution.workspace import Workspace
 from backend.samples import ReadLayout, Sample, detect_samples, validate_sample
@@ -44,6 +45,10 @@ class Project:
             micromamba_binary=resolved.micromamba_binary,
             micromamba_root=resolved.micromamba_root,
             taxonomy_environment=resolved.environment_name("taxonomy"),
+            # Resolved once, here, so every stage of this run sees the same
+            # ceiling. The value decides part of MetaPhlAn's command line and
+            # so part of the checkpoint fingerprint.
+            memory_limit_bytes=memory_limit_bytes(),
         )
 
     # ------------------------------------------------------------------

@@ -25,7 +25,13 @@ from backend.execution.workspace import Workspace  # noqa: E402
 from backend.samples import ReadLayout, Sample  # noqa: E402
 
 
-def context(root: Path, **options) -> RunContext:
+def context(root: Path, memory: int | None = None, **options) -> RunContext:
+    """A run context, optionally describing a machine of a given size.
+
+    `memory` is the ceiling the run may use, in bytes. Left unset, the context
+    reads the real machine - which is what production does and what the tests
+    covering that fallback rely on.
+    """
     return RunContext(
         workspace=Workspace(root / "run"),
         options=RunOptions(**options),
@@ -35,6 +41,7 @@ def context(root: Path, **options) -> RunContext:
         micromamba_binary=root / "bin" / "micromamba",
         micromamba_root=root / "micromamba-root",
         taxonomy_environment="bioflow-taxonomy",
+        memory_limit_bytes=memory,
     )
 
 
@@ -511,15 +518,10 @@ class MemoryMappingIsConditionalTests(unittest.TestCase):
     GIGABYTE = 1024 ** 3
 
     def _command(self, ram_gb, threads=8):
-        from unittest import mock
-
-        from backend.execution.stages import taxonomy
-
-        with mock.patch.object(taxonomy, "total_memory_bytes",
-                               return_value=ram_gb * self.GIGABYTE):
-            return stages_by_key()["metaphlan"].commands(
-                SINGLE, context(Path("/tmp"), threads=threads)
-            )[0].command
+        return stages_by_key()["metaphlan"].commands(
+            SINGLE,
+            context(Path("/tmp"), memory=ram_gb * self.GIGABYTE, threads=threads),
+        )[0].command
 
     def test_a_small_machine_memory_maps(self):
         self.assertIn("--bowtie2_exe", self._command(14))
@@ -568,12 +570,12 @@ class MemoryMappingIsConditionalTests(unittest.TestCase):
         for ram, expected in ((14, "memory-map"), (64, "load the index")):
             messages: list[str] = []
             with self.subTest(ram=ram), \
-                 mock.patch.object(taxonomy, "total_memory_bytes",
-                                   return_value=ram * self.GIGABYTE), \
                  mock.patch.object(taxonomy, "write_memory_mapped_shim",
                                    return_value=Path("/tmp/shim")):
                 taxonomy.MetaPhlAnStage().prepare(
-                    SINGLE, context(Path("/tmp")), messages.append
+                    SINGLE,
+                    context(Path("/tmp"), memory=ram * self.GIGABYTE),
+                    messages.append,
                 )
             self.assertTrue(any(expected in message for message in messages), messages)
 

@@ -16,6 +16,7 @@ from backend.config import (
     get_config,
 )
 from backend.release import component_is_available
+from backend.resources import usable_cpus
 from backend.setup import bootstrap
 from backend.setup.plan import ActionStep, CommandStep, SetupPlan
 from backend.setup.registry import (
@@ -456,7 +457,7 @@ class SetupManager:
         return steps
 
     def _threads(self) -> str:
-        return str(max(1, min(8, os.cpu_count() or self.config.default_threads)))
+        return str(max(1, min(8, usable_cpus() or self.config.default_threads)))
 
     def _database_steps(self, spec: DatabaseSpec) -> list:
         builders = {

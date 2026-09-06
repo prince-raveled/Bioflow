@@ -31,6 +31,11 @@ METAPHLAN_INDEX = "mpa_vJan25_CHOCOPhlAnSGB_202503"
 #: It never changes an installation target and never makes a resource report as
 #: managed. See resolve_grch38_index().
 DEVELOPMENT_GRCH38_VARIABLE = "BIOFLOW_GRCH38_INDEX"
+#: Points MetaPhlAn at a database BioFlow did not install. GRCh38 has had
+#: an equivalent since the beginning; this one exists because a container
+#: or a shared filesystem may hold the ~51 GB database somewhere other
+#: than under BioFlow's own database root, and copying it is not an option.
+EXTERNAL_METAPHLAN_VARIABLE = "BIOFLOW_METAPHLAN_DB"
 
 #: The six files Bowtie2 writes for one index, and the two extension flavours.
 BOWTIE2_INDEX_PARTS = ("1", "2", "3", "4", "rev.1", "rev.2")
@@ -293,6 +298,16 @@ class BioFlowConfig:
 
     @property
     def metaphlan_database_directory(self) -> Path:
+        """Where the MetaPhlAn database lives.
+
+        BIOFLOW_METAPHLAN_DB overrides the managed location. The completeness
+        check is applied to whatever this returns, so an override that does not
+        hold a full database is reported as INCOMPLETE exactly as a broken
+        managed install would be - pointing elsewhere never skips verification.
+        """
+        configured = os.environ.get(EXTERNAL_METAPHLAN_VARIABLE)
+        if configured:
+            return Path(configured).expanduser()
         return self.database_directory("metaphlan")
 
     @property

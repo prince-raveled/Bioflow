@@ -17,6 +17,7 @@ from support import clear_bioflow_environment  # noqa: E402
 from backend.config import (  # noqa: E402
     BOWTIE2_INDEX_PARTS,
     DEVELOPMENT_GRCH38_VARIABLE,
+    EXTERNAL_METAPHLAN_VARIABLE,
     BioFlowConfig,
     ResourceState,
     bowtie2_index_is_complete,
@@ -357,6 +358,54 @@ class StatusReportingTests(ResourceTestCase):
         self.assertIs(manager.database_state(specs["metaphlan_chocophlan"]).state,
                       ResourceState.MANAGED)
 
+
+
+class MetaPhlAnLocationTests(ResourceTestCase):
+    """Pointing MetaPhlAn at a database BioFlow did not install.
+
+    GRCh38 has had an override since the beginning. MetaPhlAn had none, so its
+    ~51 GB database could only ever live under BioFlow's own database root -
+    which a read-only mount, a shared filesystem or a container cannot always
+    satisfy, and which copying is not a realistic answer to.
+    """
+
+    def test_the_managed_location_is_the_default(self):
+        config = self.config()
+        self.assertEqual(
+            config.metaphlan_database_directory,
+            config.database_directory("metaphlan"),
+        )
+
+    def test_the_override_redirects_the_database(self):
+        elsewhere = self.root / "shared" / "metaphlan"
+        elsewhere.mkdir(parents=True)
+        os.environ[EXTERNAL_METAPHLAN_VARIABLE] = str(elsewhere)
+        self.assertEqual(self.config().metaphlan_database_directory, elsewhere)
+
+    def test_the_override_expands_a_home_relative_path(self):
+        os.environ[EXTERNAL_METAPHLAN_VARIABLE] = "~/somewhere/metaphlan"
+        resolved = self.config().metaphlan_database_directory
+        self.assertTrue(resolved.is_absolute())
+        self.assertNotIn("~", str(resolved))
+
+    def test_an_empty_override_is_not_an_override(self):
+        os.environ[EXTERNAL_METAPHLAN_VARIABLE] = ""
+        config = self.config()
+        self.assertEqual(
+            config.metaphlan_database_directory,
+            config.database_directory("metaphlan"),
+        )
+
+    def test_an_incomplete_override_is_still_reported_incomplete(self):
+        # Pointing elsewhere must never be a way past the completeness check:
+        # the seven required files are demanded of whatever path is in use.
+        elsewhere = self.root / "partial" / "metaphlan"
+        elsewhere.mkdir(parents=True)
+        (elsewhere / "mpa_vJan25_CHOCOPhlAnSGB_202503.pkl").write_bytes(b"x")
+        os.environ[EXTERNAL_METAPHLAN_VARIABLE] = str(elsewhere)
+        manager = SetupManager(self.config())
+        row = [c for c in manager.components() if c.key == "db:metaphlan_chocophlan"][0]
+        self.assertIsNot(row.state, ResourceState.MANAGED)
 
 if __name__ == "__main__":
     unittest.main()

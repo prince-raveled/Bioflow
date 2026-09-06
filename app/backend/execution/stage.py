@@ -10,6 +10,7 @@ import shutil
 import zlib
 
 from backend.execution.record import ValidationResult
+from backend.resources import memory_limit_bytes as detect_memory_limit
 from backend.execution.workspace import Workspace
 from backend.samples import Sample
 
@@ -65,10 +66,45 @@ class RunContext:
     micromamba_binary: Path | None = None
     micromamba_root: Path | None = None
     taxonomy_environment: str = ""
+    #: Which execution backend runs this stage's commands. "native" runs them
+    #: in BioFlow's own Micromamba environments; a container backend names
+    #: itself here and identifies its image below.
+    execution_backend: str = "native"
+    #: The container image, by digest where one is known. Empty when native.
+    execution_image: str = ""
+    #: Memory this run may use, resolved once and then held still.
+    #:
+    #: None means "not yet read". It is filled on first use and never read
+    #: again, because the value decides part of MetaPhlAn's command line and
+    #: therefore part of the checkpoint fingerprint: a number that moved
+    #: between two stages of one run would rewrite the command and invalidate
+    #: results that are still good.
+    memory_limit_bytes: int | None = None
 
     @property
     def threads(self) -> str:
         return str(max(1, self.options.threads))
+
+    def total_memory(self) -> int:
+        """Memory available to this run, in bytes, or 0 when unknown.
+
+        Installed RAM on an ordinary desktop; the cgroup ceiling where one
+        applies, which is what a container imposes and what `/proc/meminfo`
+        alone does not report.
+        """
+        if self.memory_limit_bytes is None:
+            self.memory_limit_bytes = detect_memory_limit()
+        return self.memory_limit_bytes
+
+    @property
+    def execution_identity(self) -> str:
+        """What to fold into the fingerprint so backends cannot be confused.
+
+        Empty for native execution, deliberately: see `fingerprint_for`.
+        """
+        if self.execution_backend == "native":
+            return ""
+        return f"{self.execution_backend}:{self.execution_image}"
 
 
 class Stage(ABC):

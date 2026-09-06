@@ -145,14 +145,33 @@ class StageRecord:
         )
 
 
-def fingerprint_for(commands: list[list[str]], inputs: list[Path]) -> str:
-    """Identify a stage run by its commands and the state of its input files.
+def fingerprint_for(
+    commands: list[list[str]], inputs: list[Path], execution_identity: str = ""
+) -> str:
+    """Identify a stage run by its commands, its inputs, and where it ran.
 
     Using size and modification time alongside the command means an edited or
     replaced input invalidates the checkpoint, which a bare existence check
     would not catch.
+
+    `execution_identity` names the backend that produced the result, and exists
+    because the command alone does not distinguish them. FastQC, fastp, MultiQC
+    and host removal pass no argument that differs between running natively and
+    running in a container, so without this their fingerprints match across
+    backends: switching backend and pressing Run would mark those stages
+    up-to-date from the other backend's results and re-run only MetaPhlAn,
+    leaving a record that claims one execution environment for a result four
+    fifths of which came from the other.
+
+    Native execution deliberately contributes nothing to the digest. It is the
+    baseline, and leaving it empty keeps every checkpoint written before
+    backends existed valid - which matters when the stage being spared is a
+    ninety-minute profiling run.
     """
     digest = hashlib.sha256()
+    if execution_identity:
+        digest.update(execution_identity.encode("utf-8"))
+        digest.update(b"\x1d")
     for command in commands:
         digest.update("\x1f".join(command).encode("utf-8"))
         digest.update(b"\x1e")

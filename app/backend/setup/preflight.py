@@ -9,6 +9,12 @@ import sys
 import time
 
 from backend.config import BioFlowConfig
+from backend.resources import (
+    available_memory_bytes as detect_available_memory,
+    meminfo_bytes,
+    memory_limit_bytes,
+    usable_cpus,
+)
 from backend.setup.bootstrap import human_bytes
 
 
@@ -113,17 +119,7 @@ def available_memory_bytes() -> int:
     fitted but an editor and a browser open cannot spare the 10 GB MetaPhlAn
     wants, and the kernel resolves that by killing something.
     """
-    try:
-        text = Path("/proc/meminfo").read_text(encoding="utf-8")
-    except OSError:
-        return 0
-    for line in text.splitlines():
-        if line.startswith("MemAvailable:"):
-            try:
-                return int(line.split()[1]) * 1024
-            except (ValueError, IndexError):
-                return 0
-    return 0
+    return detect_available_memory()
 
 
 def swap_bytes() -> tuple[int, int]:
@@ -138,14 +134,7 @@ def swap_bytes() -> tuple[int, int]:
     disk swap had MetaPhlAn killed at 6.8 GB twice; the same machine, same
     command, with a 16 GB swapfile added, ran it to completion.
     """
-    total = 0
-    try:
-        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
-            if line.startswith("SwapTotal:"):
-                total = int(line.split()[1]) * 1024
-                break
-    except (OSError, ValueError, IndexError):
-        return 0, 0
+    total = meminfo_bytes("SwapTotal")
 
     compressed = 0
     try:
@@ -159,11 +148,13 @@ def swap_bytes() -> tuple[int, int]:
 
 
 def total_memory_bytes() -> int:
-    """Installed RAM, or 0 when it cannot be determined."""
-    try:
-        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-    except (ValueError, OSError, AttributeError):
-        return 0
+    """Memory this machine may give a run, or 0 when it cannot be determined.
+
+    Delegated so that preflight and the taxonomy stage cannot disagree about
+    how much memory there is: they previously answered the question with two
+    different implementations, and a cgroup ceiling was invisible to both.
+    """
+    return memory_limit_bytes()
 
 
 #: Connectivity is re-tested at most this often, so toggling a checkbox in the
@@ -285,7 +276,7 @@ def run_preflight(
         )
     )
 
-    cores = os.cpu_count() or 1
+    cores = usable_cpus()
     checks.append(SystemCheck("CPU cores", cores >= 2, f"{cores} core(s) available"))
 
     memory = total_memory_bytes()
