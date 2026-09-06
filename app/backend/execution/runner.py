@@ -151,6 +151,17 @@ class CommandRunner:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 process.kill()
+        # A container backend runs the tool inside a container, and stopping the
+        # client that started it is not always enough: a client killed outright
+        # leaves the container running with nothing attached to it. Resolvers
+        # that can strand a container that way expose this and clean up after
+        # themselves. The native resolver has nothing to clean, and does not.
+        cleanup = getattr(self.resolver, "cleanup_containers", None)
+        if callable(cleanup):
+            try:
+                cleanup()
+            except Exception:  # noqa: BLE001 - cancelling must never raise
+                pass
 
     # ------------------------------------------------------------------
     def run(
