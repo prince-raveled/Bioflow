@@ -1,0 +1,5 @@
+# Taxonomic profiling: MetaPhlAn with its own Bowtie2.
+# Bowtie2 is the same build as the host-removal environment; MetaPhlAn calls it
+# directly, and through /opt/bioflow/bin/bowtie2-mm when the index is mapped.
+metaphlan=4.2.6
+bowtie2=2.5.5

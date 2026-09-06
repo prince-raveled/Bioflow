@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Bowtie2 with --mm forced on, for machines that cannot hold the 33 GB index.
+#
+# MetaPhlAn takes a path to an executable rather than extra Bowtie2 arguments,
+# so the option is added by pointing it at this script. It goes through
+# Micromamba rather than calling the prefix binary directly because Bowtie2 is a
+# Perl script that needs its environment activated: invoked without that, it
+# dies on a missing Sys::Hostname.
+#
+# The native installation generates its own copy of this at run time, filled in
+# from configuration. Inside the image the paths are fixed, so it ships built.
+exec /usr/local/bin/micromamba run -r /opt/conda -n bioflow-taxonomy bowtie2 --mm "$@"

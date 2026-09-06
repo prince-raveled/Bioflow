@@ -1,0 +1,6 @@
+# Quality control: FastQC, fastp, MultiQC.
+# Versions pinned to what the native BioFlow installation resolved to, so a
+# container run executes the same tools as the desktop run it is compared with.
+fastqc=0.12.1
+fastp=1.3.6
+multiqc=1.35

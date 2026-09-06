@@ -1,0 +1,2 @@
+# The build context is this directory only; nothing else belongs in the image.
+*.lock
