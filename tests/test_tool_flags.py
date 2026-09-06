@@ -251,16 +251,107 @@ def flags_by_tool(path: Path) -> dict[str, set[str]]:
     return found
 
 
+def page_command_builders() -> dict[str, list[list[str]]]:
+    """The argv each standalone page builds, keyed by the page's module name.
+
+    Read by calling the builders the pages call, rather than by scanning their
+    source. Source scanning was the only option while the pages assembled their
+    own flag lists inside Qt handlers that need a populated interface; now that
+    each page delegates to its stage's builder, the exact argv is reachable
+    directly - which checks what the page really passes rather than what its
+    source happens to spell.
+
+    Both layouts are built for every page that has them, because single-end and
+    paired-end reach different branches and a flag can be missing from only one.
+    """
+    from backend.execution.stage import RunContext, RunOptions
+    from backend.execution.stages.host_removal import HostRemovalStage
+    from backend.execution.stages.qc import MultiQCStage, fastqc_raw_stage
+    from backend.execution.stages.taxonomy import MetaPhlAnStage
+    from backend.execution.stages.trimming import FastpStage
+    from backend.execution.workspace import Workspace
+
+    root = Path("/tmp/bioflow-flag-probe")
+    reads = [root / "a_R1.fastq.gz", root / "a_R2.fastq.gz"]
+
+    def context(**fields):
+        return RunContext(
+            workspace=Workspace(root),
+            options=RunOptions(threads=4, **fields.pop("options", {})),
+            memory_limit_bytes=14 * 1024 ** 3,
+            **fields,
+        )
+
+    built: dict[str, list[list[str]]] = {}
+
+    built["fastqc_page.py"] = [
+        fastqc_raw_stage().report_command(reads, root, context()).command
+    ]
+    built["multiqc_page.py"] = [
+        MultiQCStage().aggregate_command(reads, root).command
+    ]
+    built["fastp_page.py"] = [
+        FastpStage().trim_command(
+            reads=reads[:count], trimmed=[root / f"t{i}.fastq.gz" for i in range(count)],
+            html=root / "r.html", report_json=root / "r.json",
+            context=context(), paired=count == 2,
+        ).command
+        for count in (1, 2)
+    ]
+    host = context(host_index_prefix=root / "GRCh38_index")
+    built["host_removal_page.py"] = [
+        HostRemovalStage().removal_command(
+            reads=reads[:count], unmatched=root / "u.fastq.gz", log=root / "b.log",
+            context=host, paired=count == 2,
+        ).command
+        for count in (1, 2)
+    ]
+    taxonomy = context(
+        metaphlan_database=root / "db",
+        metaphlan_index="mpa_vJan25_CHOCOPhlAnSGB_202503",
+        bowtie2_memory_mapped_shim=root / "bowtie2-mm",
+    )
+    subsampled = context(
+        options={"metaphlan_subsample_pairs": 1000},
+        metaphlan_database=root / "db",
+        metaphlan_index="mpa_vJan25_CHOCOPhlAnSGB_202503",
+        bowtie2_memory_mapped_shim=root / "bowtie2-mm",
+    )
+    built["metaphlan_page.py"] = [
+        MetaPhlAnStage().profile_command(
+            reads=reads[:count], profile=root / "p.txt", mapout=root / "m.txt.bz2",
+            context=ctx, paired=count == 2,
+        ).command
+        for ctx in (taxonomy, subsampled)
+        for count in (1, 2)
+    ]
+    return built
+
+
+def flags_in(command: list[str]) -> set[str]:
+    """Flag-shaped arguments of one argv, by the same rule as the source scan."""
+    return {
+        word for word in command
+        if word.startswith("-") and len(word) > 1 and not word[1].isdigit()
+    }
+
+
+def tool_of(command: list[str]) -> str:
+    return command[0]
+
+
 class StandalonePageFlagTests(RealInstallationMixin, unittest.TestCase):
-    """The tool pages construct commands independently of the pipeline stages.
+    """Every flag a standalone page passes must be one its tool still accepts.
 
-    Only the stages were flag-checked, so a page could carry an option its tool
-    had dropped and nothing would notice until someone pressed the button. That
-    is exactly how MetaPhlAn's --bowtie2db survived: constructing the command
-    proved nothing about whether the tool still accepted it.
+    A page could once carry an option its tool had dropped and nothing would
+    notice until someone pressed the button. That is exactly how MetaPhlAn's
+    --bypass-nucleotide-search style of drift survives: constructing a command
+    proves nothing about whether the tool accepts it.
 
-    The flags are discovered from the source, so this keeps covering the pages
-    as they change rather than pinning today's list.
+    The pages no longer assemble their own flags - each delegates to its stage's
+    builder - so these check the argv those builders actually produce. That is
+    what the page will really run, and it cannot drift from the pipeline while
+    both come from one function.
     """
 
     @classmethod
@@ -276,24 +367,48 @@ class StandalonePageFlagTests(RealInstallationMixin, unittest.TestCase):
         return sorted((Path(__file__).resolve().parent.parent / "app" / "gui" / "pages").glob("*.py"))
 
     def test_the_scan_finds_the_pages_that_build_commands(self):
-        # If this ever finds nothing, the test below is silently vacuous.
-        building = [path.name for path in self._pages() if flags_by_tool(path)]
+        # If this ever finds nothing, the tests below are silently vacuous.
+        # An empty flag set counts as nothing found, which a dict of empty sets
+        # did not: that is how this passed while proving less than it appeared.
+        building = {
+            name: commands for name, commands in page_command_builders().items()
+            if any(flags_in(command) for command in commands)
+        }
         self.assertGreaterEqual(
-            len(building), 4, f"expected several command-building pages, found {building}"
+            len(building), 4,
+            f"expected several command-building pages, found {sorted(building)}",
         )
+
+    def test_every_page_still_delegates_to_a_stage_builder(self):
+        """No page may reintroduce a hand-built command.
+
+        The duplication these tests were written to police is gone because the
+        pages call the stages. A page that started spelling its own flags again
+        would restore it, so the source is checked for exactly that.
+        """
+        for path in self._pages():
+            with self.subTest(page=path.name):
+                self.assertEqual(
+                    {tool: sorted(flags) for tool, flags in flags_by_tool(path).items() if flags},
+                    {},
+                    f"{path.name} builds tool flags itself instead of calling its stage",
+                )
 
     def test_every_flag_a_page_passes_is_accepted_by_its_tool(self):
         checked = 0
-        for path in self._pages():
-            for tool, flags in sorted(flags_by_tool(path).items()):
+        for name, commands in sorted(page_command_builders().items()):
+            for command in commands:
+                tool = tool_of(command)
+                if tool not in VERIFIABLE_TOOLS:
+                    continue
                 environment = VERIFIABLE_TOOLS[tool]
                 if not environment_ready(environment, tool):
                     continue
                 help_text = tool_help(environment, tool)
-                for flag in sorted(flags):
+                for flag in sorted(flags_in(command)):
                     if flag in UNCHECKED_SHORT_FLAGS:
                         continue
-                    with self.subTest(page=path.name, tool=tool, flag=flag):
+                    with self.subTest(page=name, tool=tool, flag=flag):
                         assert_flag_supported(self, flag, help_text, tool)
                         checked += 1
         self.assertGreater(checked, 0, "no page flags were verified against any tool")
@@ -301,26 +416,56 @@ class StandalonePageFlagTests(RealInstallationMixin, unittest.TestCase):
     def test_the_pages_and_the_stages_agree_on_their_shared_flags(self):
         """A flag used by both must mean the same thing in both.
 
-        The pages and the stages are separate command builders for the same
-        tools. They are allowed to differ - a page writes wherever the user
-        chose - but a flag one of them uses and the other has abandoned is a
-        sign that a fix landed in only one of the two.
+        Previously the pages and the stages were separate builders for the same
+        tools, and this could only require that the page had not dropped a flag
+        the stage still passed. They are now one builder, so the stronger
+        statement holds and is asserted instead: for the same layout the two
+        callers produce the same flags exactly.
         """
-        page_flags: dict[str, set[str]] = {}
-        for path in self._pages():
-            for tool, flags in flags_by_tool(path).items():
-                page_flags.setdefault(tool, set()).update(flags)
+        from backend.execution.pipeline import stages_by_key
+        from backend.execution.stage import RunContext, RunOptions
+        from backend.execution.workspace import Workspace
+        from backend.samples import ReadLayout, Sample
 
-        stage_flags = {
-            "fastqc": {"--threads", "--outdir"},
-            "fastp": {"--thread", "--html", "--json"},
-            "multiqc": {"--outdir", "--force"},
-            "bowtie2": {"--very-sensitive", "--un-gz", "--un-conc-gz"},
-        }
-        for tool, expected in stage_flags.items():
+        root = Path("/tmp/bioflow-flag-probe")
+
+        def context(subsample=None):
+            return RunContext(
+                workspace=Workspace(root),
+                options=RunOptions(threads=4, metaphlan_subsample_pairs=subsample),
+                host_index_prefix=root / "GRCh38_index",
+                metaphlan_database=root / "db",
+                metaphlan_index="mpa_vJan25_CHOCOPhlAnSGB_202503",
+                bowtie2_memory_mapped_shim=root / "bowtie2-mm",
+                memory_limit_bytes=14 * 1024 ** 3,
+            )
+
+        samples = [
+            Sample("s", ReadLayout.SINGLE, root / "a.fastq.gz"),
+            Sample("p", ReadLayout.PAIRED, root / "a_R1.fastq.gz", root / "a_R2.fastq.gz"),
+        ]
+        stage_flags: dict[str, set[str]] = {}
+        # Both option sets, because subsampling adds flags on one branch only
+        # and the page offers the same control. Comparing a stage that never
+        # subsamples against a page that can would report a difference that is
+        # only in the probe.
+        for subsample in (None, 1000):
+            for stage in stages_by_key().values():
+                for sample in samples:
+                    for command in stage.commands(sample, context(subsample)):
+                        stage_flags.setdefault(tool_of(command.command), set()).update(
+                            flags_in(command.command)
+                        )
+
+        page_flags: dict[str, set[str]] = {}
+        for commands in page_command_builders().values():
+            for command in commands:
+                page_flags.setdefault(tool_of(command), set()).update(flags_in(command))
+
+        for tool in ("fastqc", "fastp", "multiqc", "bowtie2", "metaphlan"):
             with self.subTest(tool=tool):
-                self.assertTrue(
-                    expected <= page_flags.get(tool, set()),
-                    f"the {tool} page no longer passes {expected - page_flags.get(tool, set())}, "
-                    f"which the pipeline stage still does",
+                self.assertEqual(
+                    page_flags.get(tool, set()),
+                    stage_flags.get(tool, set()),
+                    f"the {tool} page and stage no longer produce the same flags",
                 )

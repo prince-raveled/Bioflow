@@ -10,7 +10,8 @@ from PyQt6.QtWidgets import (
 )
 
 from backend.samples import FASTQ_EXTENSIONS, FASTQ_FILE_FILTER, ReadLayout
-from gui.pages.qc_tool_page import QCToolPage
+from backend.execution.stages.trimming import FastpStage
+from gui.pages.qc_tool_page import QCToolPage, tool_context
 from gui import dialogs
 
 
@@ -120,13 +121,17 @@ class FastPPage(QCToolPage):
         assert self.output_directory is not None
         self.output_directory.mkdir(parents=True, exist_ok=True)
 
-        output_1 = self.output_directory / self._trimmed_name(self.fastq_files[0])
-        report_prefix = self.output_directory / "fastp_report"
-        command = [
-            "fastp", "--thread", str(self.threads.value()), "-i", self.fastq_files[0], "-o", str(output_1),
-            "--html", f"{report_prefix}.html", "--json", f"{report_prefix}.json",
+        paired = len(self.fastq_files) == 2
+        trimmed = [
+            self.output_directory / self._trimmed_name(name) for name in self.fastq_files
         ]
-        if len(self.fastq_files) == 2:
-            output_2 = self.output_directory / self._trimmed_name(self.fastq_files[1])
-            command.extend(["-I", self.fastq_files[1], "-O", str(output_2)])
-        self.start_tool(command)
+        report_prefix = self.output_directory / "fastp_report"
+        command = FastpStage().trim_command(
+            reads=[Path(name) for name in self.fastq_files],
+            trimmed=trimmed,
+            html=Path(f"{report_prefix}.html"),
+            report_json=Path(f"{report_prefix}.json"),
+            context=tool_context(self.output_directory, self.threads.value()),
+            paired=paired,
+        )
+        self.start_tool(list(command.command))

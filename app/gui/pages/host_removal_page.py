@@ -25,10 +25,10 @@ from backend.samples import (
 )
 from backend.execution.record import ValidationResult
 from backend.execution.stage import check_exists, check_gzip_readable
-from backend.execution.stages.host_removal import HostRemovalStage, gzip_output_argument
+from backend.execution.stages.host_removal import HostRemovalStage
 from backend.setup.manager import BOWTIE2_INDEX_PARTS, bowtie2_index_is_complete
 from gui.widgets.status_badge import StatusBadge
-from gui.pages.qc_tool_page import QCToolPage
+from gui.pages.qc_tool_page import QCToolPage, tool_context
 from gui import dialogs
 
 
@@ -302,21 +302,33 @@ class HostRemovalPage(QCToolPage):
 
         self.output_directory.mkdir(parents=True, exist_ok=True)
         self._pending_jobs = []
+        stage = HostRemovalStage()
+        # One context for the batch: every job shares the index and the thread
+        # count, and the builder reads both from here.
+        context = tool_context(
+            self.output_directory,
+            self.threads.value(),
+            host_index_prefix=Path(self.index_prefix),
+        )
         source_sets = read_pairs if paired else [(file_name, "") for file_name in self.single_fastq_files]
         for read_1, read_2 in source_sets:
             sample = self._safe_output_name(self._sample_name(read_1))
             log_file = self.output_directory / f"{sample}_bowtie2.log"
-            command = ["bowtie2", "--very-sensitive", "-p", str(self.threads.value()), "-x", str(self.index_prefix)]
             # The sample token is already sanitised, but the user's chosen output
-            # folder is not, and Bowtie2 passes these paths through its own shell.
-            if paired:
-                pattern = self.output_directory / f"{sample}_nohost_R%.fastq.gz"
-                command.extend(["-1", read_1, "-2", read_2,
-                                "--un-conc-gz", gzip_output_argument(pattern)])
-            else:
-                unmapped = self.output_directory / f"{sample}_nohost.fastq.gz"
-                command.extend(["-U", read_1, "--un-gz", gzip_output_argument(unmapped)])
-            command.extend(["-S", "/dev/null"])
+            # folder is not, and Bowtie2 passes these paths through its own
+            # shell; the stage's builder is what quotes it.
+            unmatched = self.output_directory / (
+                f"{sample}_nohost_R%.fastq.gz" if paired else f"{sample}_nohost.fastq.gz"
+            )
+            built = stage.removal_command(
+                reads=[Path(read_1)] + ([Path(read_2)] if paired else []),
+                unmatched=unmatched,
+                log=log_file,
+                context=context,
+                paired=paired,
+                label=sample,
+            )
+            command = list(built.command)
             expected = (
                 [self.output_directory / f"{sample}_nohost_R{mate}.fastq.gz" for mate in (1, 2)]
                 if paired

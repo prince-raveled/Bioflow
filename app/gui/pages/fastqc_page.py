@@ -4,7 +4,8 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSlider
 
 from backend.samples import FASTQ_FILE_FILTER
-from gui.pages.qc_tool_page import QCToolPage
+from backend.execution.stages.qc import fastqc_raw_stage
+from gui.pages.qc_tool_page import QCToolPage, tool_context
 from gui import dialogs
 
 
@@ -58,4 +59,9 @@ class FastQCPage(QCToolPage):
             return
         assert self.output_directory is not None
         self.output_directory.mkdir(parents=True, exist_ok=True)
-        self.start_tool(["fastqc", "--threads", str(self.threads.value()), "--outdir", str(self.output_directory), *self.fastq_files])
+        command = fastqc_raw_stage().report_command(
+            reads=[Path(name) for name in self.fastq_files],
+            directory=self.output_directory,
+            context=tool_context(self.output_directory, self.threads.value()),
+        )
+        self.start_tool(list(command.command))

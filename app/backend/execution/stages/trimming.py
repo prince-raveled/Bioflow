@@ -54,31 +54,55 @@ class FastpStage(Stage):
     def inputs(self, sample: Sample, context: RunContext) -> list[Path]:
         return sample.reads()
 
-    def commands(self, sample: Sample, context: RunContext) -> list[StageCommand]:
-        workspace = context.workspace
-        trimmed = workspace.trimmed_reads(sample)
-        html = workspace.fastp_report(sample, "html")
-        report_json = workspace.fastp_report(sample, "json")
+    def trim_command(
+        self,
+        reads: list[Path],
+        trimmed: list[Path],
+        html: Path,
+        report_json: Path,
+        context: RunContext,
+        paired: bool,
+        label: str = "",
+    ) -> StageCommand:
+        """Build one fastp invocation for the given reads.
 
+        Separate from commands() so the standalone fastp page trims files the
+        user picked without a second copy of the flags. The two callers differ
+        only in where the reads come from and where the results go; everything
+        about how fastp is run is decided here.
+        """
         command = [
             "fastp",
             "--thread",
             context.threads,
             "-i",
-            str(sample.read1),
+            str(reads[0]),
             "-o",
             str(trimmed[0]),
         ]
-        if sample.is_paired:
-            command += ["-I", str(sample.read2), "-O", str(trimmed[1])]
+        if paired:
+            command += ["-I", str(reads[1]), "-O", str(trimmed[1])]
         command += ["--html", str(html), "--json", str(report_json)]
 
-        layout = "paired-end" if sample.is_paired else "single-end"
+        layout = "paired-end" if paired else "single-end"
+        named = f"{label} " if label else ""
+        return StageCommand(
+            description=f"Trim {named}({layout}) with fastp",
+            command=command,
+            environment_key=self.environment_key,
+        )
+
+    def commands(self, sample: Sample, context: RunContext) -> list[StageCommand]:
+        workspace = context.workspace
         return [
-            StageCommand(
-                description=f"Trim {sample.name} ({layout}) with fastp",
-                command=command,
-                environment_key=self.environment_key,
+            self.trim_command(
+                reads=sample.reads(),
+                trimmed=workspace.trimmed_reads(sample),
+                html=workspace.fastp_report(sample, "html"),
+                report_json=workspace.fastp_report(sample, "json"),
+                context=context,
+                paired=sample.is_paired,
+                label=sample.name,
             )
         ]
 

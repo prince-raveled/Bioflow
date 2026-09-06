@@ -44,20 +44,37 @@ class FastQCStage(Stage):
             return sample.reads()
         return context.workspace.trimmed_reads(sample)
 
+    def report_command(
+        self,
+        reads: list[Path],
+        directory: Path,
+        context: RunContext,
+        label: str = "",
+    ) -> StageCommand:
+        """Build one FastQC invocation over the given files.
+
+        Separate from commands() so the standalone FastQC page reports on files
+        the user picked without a second copy of the flags. The two callers
+        differ only in which files are read and where the reports go.
+        """
+        named = f" ({label})" if label else ""
+        return StageCommand(
+            description=f"FastQC on {len(reads)} file(s){named}",
+            command=[
+                "fastqc",
+                "--threads",
+                context.threads,
+                "--outdir",
+                str(directory),
+                *[str(path) for path in reads],
+            ],
+            environment_key=self.environment_key,
+        )
+
     def commands(self, sample: Sample, context: RunContext) -> list[StageCommand]:
-        directory = self._directory_for(context)
         return [
-            StageCommand(
-                description=f"FastQC on {len(self.inputs(sample, context))} file(s)",
-                command=[
-                    "fastqc",
-                    "--threads",
-                    context.threads,
-                    "--outdir",
-                    str(directory),
-                    *[str(path) for path in self.inputs(sample, context)],
-                ],
-                environment_key=self.environment_key,
+            self.report_command(
+                self.inputs(sample, context), self._directory_for(context), context
             )
         ]
 
@@ -114,21 +131,36 @@ class MultiQCStage(Stage):
                 found.extend(sorted(directory.glob("*.json")))
         return found
 
+    def aggregate_command(
+        self, sources: list[Path], directory: Path, label: str = ""
+    ) -> StageCommand:
+        """Build one MultiQC invocation over the given sources.
+
+        Separate from commands() so the standalone MultiQC page aggregates
+        reports the user picked without a second copy of the flags. MultiQC
+        accepts directories and files alike, which is the only way the two
+        callers differ: the workflow hands it the three directories it filled,
+        the page hands it the files someone chose.
+        """
+        named = f" ({label})" if label else ""
+        return StageCommand(
+            description=f"Aggregate QC reports with MultiQC{named}",
+            command=[
+                "multiqc",
+                *[str(path) for path in sources],
+                "--outdir",
+                str(directory),
+                "--force",
+            ],
+            environment_key=self.environment_key,
+        )
+
     def commands(self, sample: Sample, context: RunContext) -> list[StageCommand]:
         workspace = context.workspace
         return [
-            StageCommand(
-                description="Aggregate QC reports with MultiQC",
-                command=[
-                    "multiqc",
-                    str(workspace.qc_raw),
-                    str(workspace.qc_trimmed),
-                    str(workspace.trimmed),
-                    "--outdir",
-                    str(workspace.multiqc),
-                    "--force",
-                ],
-                environment_key=self.environment_key,
+            self.aggregate_command(
+                [workspace.qc_raw, workspace.qc_trimmed, workspace.trimmed],
+                workspace.multiqc,
             )
         ]
 

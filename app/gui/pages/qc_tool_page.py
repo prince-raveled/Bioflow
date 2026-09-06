@@ -12,9 +12,28 @@ from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QTextEdit,
 from backend.config import get_config
 from backend.execution.environment import EnvironmentResolver, MissingBackend
 from backend.execution.runner import is_harmless_tool_noise
+from backend.execution.stage import RunContext, RunOptions
+from backend.execution.workspace import Workspace
 from backend.history import RunHistory
 from gui.widgets.status_badge import StatusBadge
 from gui import dialogs
+
+
+def tool_context(output_directory: Path, threads: int, **fields) -> RunContext:
+    """A run context for a standalone tool page.
+
+    The stages own how every tool is invoked, and they express that through a
+    RunContext. A page that wants the same invocation for files a user picked
+    needs one too - so it builds a minimal context here rather than assembling
+    the flags itself. The workspace is rooted at the chosen folder but the
+    builders are given explicit paths, so a page still writes where it always
+    has and does not inherit the numbered pipeline layout.
+    """
+    return RunContext(
+        workspace=Workspace(output_directory),
+        options=RunOptions(threads=threads),
+        **fields,
+    )
 
 
 class QCToolPage(QWidget):

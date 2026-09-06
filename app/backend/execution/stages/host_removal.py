@@ -58,11 +58,26 @@ class HostRemovalStage(Stage):
     def inputs(self, sample: Sample, context: RunContext) -> list[Path]:
         return context.workspace.trimmed_reads(sample)
 
-    def commands(self, sample: Sample, context: RunContext) -> list[StageCommand]:
+    def removal_command(
+        self,
+        reads: list[Path],
+        unmatched: Path,
+        log: Path,
+        context: RunContext,
+        paired: bool,
+        label: str = "",
+    ) -> StageCommand:
+        """Build one Bowtie2 host-removal invocation for the given reads.
+
+        Separate from commands() so the standalone host-removal page filters
+        files the user picked without a second copy of the flags. `unmatched` is
+        Bowtie2's output template: for a pair the `%` pattern --un-conc-gz
+        expands into two mate files, for a single sample the one file --un-gz
+        writes. Getting that distinction wrong is how a paired run silently
+        produces a single interleaved file, so it is decided in one place.
+        """
         if context.host_index_prefix is None:
             raise ValueError("No GRCh38 Bowtie2 index is configured for host removal.")
-        workspace = context.workspace
-        trimmed = self.inputs(sample, context)
 
         command = [
             "bowtie2",
@@ -72,32 +87,49 @@ class HostRemovalStage(Stage):
             "-x",
             str(context.host_index_prefix),
         ]
-        if sample.is_paired:
+        if paired:
             command += [
                 "-1",
-                str(trimmed[0]),
+                str(reads[0]),
                 "-2",
-                str(trimmed[1]),
+                str(reads[1]),
                 "--un-conc-gz",
-                gzip_output_argument(workspace.host_removed_pattern(sample)),
+                gzip_output_argument(unmatched),
             ]
         else:
             command += [
                 "-U",
-                str(trimmed[0]),
+                str(reads[0]),
                 "--un-gz",
-                gzip_output_argument(workspace.host_removed_reads(sample)[0]),
+                gzip_output_argument(unmatched),
             ]
         command += ["-S", "/dev/null"]
 
-        layout = "paired-end" if sample.is_paired else "single-end"
+        layout = "paired-end" if paired else "single-end"
+        named = f"{label} " if label else ""
+        return StageCommand(
+            description=f"Remove human reads from {named}({layout})",
+            command=command,
+            environment_key=self.environment_key,
+            # Bowtie2 prints its alignment summary to stderr.
+            stderr_to=log,
+        )
+
+    def commands(self, sample: Sample, context: RunContext) -> list[StageCommand]:
+        workspace = context.workspace
+        unmatched = (
+            workspace.host_removed_pattern(sample)
+            if sample.is_paired
+            else workspace.host_removed_reads(sample)[0]
+        )
         return [
-            StageCommand(
-                description=f"Remove human reads from {sample.name} ({layout})",
-                command=command,
-                environment_key=self.environment_key,
-                # Bowtie2 prints its alignment summary to stderr.
-                stderr_to=workspace.bowtie2_log(sample),
+            self.removal_command(
+                reads=self.inputs(sample, context),
+                unmatched=unmatched,
+                log=workspace.bowtie2_log(sample),
+                context=context,
+                paired=sample.is_paired,
+                label=sample.name,
             )
         ]
 

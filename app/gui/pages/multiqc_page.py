@@ -2,6 +2,7 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import QLabel, QPushButton
 
+from backend.execution.stages.qc import MultiQCStage
 from gui.pages.qc_tool_page import QCToolPage
 from gui import dialogs
 
@@ -42,4 +43,8 @@ class MultiQCPage(QCToolPage):
             return
         assert self.output_directory is not None
         self.output_directory.mkdir(parents=True, exist_ok=True)
-        self.start_tool(["multiqc", *self.input_paths, "--outdir", str(self.output_directory), "--force"])
+        command = MultiQCStage().aggregate_command(
+            sources=[Path(name) for name in self.input_paths],
+            directory=self.output_directory,
+        )
+        self.start_tool(list(command.command))
