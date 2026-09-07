@@ -44,16 +44,27 @@ class RealInstallationMixin:
     """
 
     _saved_data_dir = None
+    _saved_backend = None
 
     @classmethod
     def use_real_installation(cls) -> None:
         cls._saved_data_dir = os.environ.pop("BIOFLOW_DATA_DIR", None)
+        # The real installation is wanted for its tools and databases, not for
+        # whichever execution backend happens to be selected in the interface.
+        # Without this, choosing container execution would make these tests
+        # start running containers, which is not what they are for.
+        cls._saved_backend = os.environ.get("BIOFLOW_EXECUTION_BACKEND")
+        os.environ["BIOFLOW_EXECUTION_BACKEND"] = "native"
         reload_config()
 
     @classmethod
     def restore_environment(cls) -> None:
         if cls._saved_data_dir is not None:
             os.environ["BIOFLOW_DATA_DIR"] = cls._saved_data_dir
+        if cls._saved_backend is None:
+            os.environ.pop("BIOFLOW_EXECUTION_BACKEND", None)
+        else:
+            os.environ["BIOFLOW_EXECUTION_BACKEND"] = cls._saved_backend
         reload_config()
 
 

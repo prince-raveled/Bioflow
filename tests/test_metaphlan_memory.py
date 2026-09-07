@@ -580,6 +580,67 @@ class MemoryMappingIsConditionalTests(unittest.TestCase):
             self.assertTrue(any(expected in message for message in messages), messages)
 
 
+class SuppliedShimTests(unittest.TestCase):
+    """A shim the execution environment already provides is not rewritten.
+
+    The image ships one at a fixed path, pointing at the Micromamba that is
+    actually inside it. Writing the host's version over that path is impossible
+    on a read-only filesystem, and pointing MetaPhlAn at the host's copy is
+    worse than useless: its contents name a Micromamba root the container does
+    not have, so the first alignment fails.
+    """
+
+    GIGABYTE = 1024 ** 3
+
+    def _context(self, provided):
+        from backend.execution.stage import RunContext
+
+        made = context(Path("/tmp"), memory=14 * self.GIGABYTE)
+        made.shim_is_provided = provided
+        if provided:
+            made.bowtie2_memory_mapped_shim = Path("/opt/bioflow/bin/bowtie2-mm")
+            # The image supplies these; a container run has no host Micromamba.
+            made.micromamba_binary = None
+            made.micromamba_root = None
+        return made
+
+    def test_a_supplied_shim_is_not_written(self):
+        from unittest import mock
+
+        from backend.execution.stages import taxonomy
+
+        with mock.patch.object(taxonomy, "write_memory_mapped_shim") as wrote:
+            taxonomy.MetaPhlAnStage().prepare(SINGLE, self._context(True), lambda _m: None)
+        wrote.assert_not_called()
+
+    def test_a_supplied_shim_is_still_explained(self):
+        messages = []
+        taxonomy_stage = stages_by_key()["metaphlan"]
+        taxonomy_stage.prepare(SINGLE, self._context(True), messages.append)
+        self.assertTrue(
+            any("memory-map" in message for message in messages),
+            f"the choice was not explained: {messages}",
+        )
+
+    def test_a_supplied_shim_still_reaches_the_command(self):
+        command = stages_by_key()["metaphlan"].commands(SINGLE, self._context(True))[0].command
+        self.assertIn("--bowtie2_exe", command)
+        self.assertEqual(
+            command[command.index("--bowtie2_exe") + 1], "/opt/bioflow/bin/bowtie2-mm"
+        )
+
+    def test_the_host_still_writes_its_own(self):
+        from unittest import mock
+
+        from backend.execution.stages import taxonomy
+
+        with mock.patch.object(
+            taxonomy, "write_memory_mapped_shim", return_value=Path("/tmp/shim")
+        ) as wrote:
+            taxonomy.MetaPhlAnStage().prepare(SINGLE, self._context(False), lambda _m: None)
+        wrote.assert_called_once()
+
+
 class OutputNamingTests(unittest.TestCase):
     """The standalone page names its results the way the rest of BioFlow does.
 

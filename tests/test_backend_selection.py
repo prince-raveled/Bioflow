@@ -297,5 +297,60 @@ class ImageReferenceTests(unittest.TestCase):
             self.assertEqual(backends.execution_image_reference(config), "img:1")
 
 
+class OverrideTests(unittest.TestCase):
+    """Forcing a backend for one process, without changing saved settings.
+
+    A test that deliberately uses the real installation would otherwise inherit
+    whichever backend the person running it happens to have selected, so a
+    suite could quietly start running containers because of a choice made in
+    the interface. A scripted or CI run gets the same guarantee.
+    """
+
+    def setUp(self):
+        self.root = Path(support.isolate_bioflow_data_directory(self))
+
+    def _reloaded(self):
+        from backend.config import get_config, reload_config
+
+        reload_config()
+        return get_config()
+
+    def test_the_override_wins_over_the_saved_choice(self):
+        import os
+
+        config = self._reloaded()
+        config.execution_backend = "container"
+        config.save()
+        os.environ["BIOFLOW_EXECUTION_BACKEND"] = "native"
+        self.assertEqual(self._reloaded().execution_backend, "native")
+
+    def test_the_override_can_also_select_containers(self):
+        import os
+
+        os.environ["BIOFLOW_EXECUTION_BACKEND"] = "container"
+        self.assertEqual(self._reloaded().execution_backend, "container")
+
+    def test_an_unknown_override_is_ignored(self):
+        import os
+
+        os.environ["BIOFLOW_EXECUTION_BACKEND"] = "quantum"
+        self.assertEqual(self._reloaded().execution_backend, "native")
+
+    def test_the_override_is_not_persisted(self):
+        # It decides what this process does, not what the person has chosen.
+        import json
+        import os
+
+        os.environ["BIOFLOW_EXECUTION_BACKEND"] = "container"
+        config = self._reloaded()
+        config.save()
+        os.environ.pop("BIOFLOW_EXECUTION_BACKEND", None)
+        saved = json.loads((self.root / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["execution"]["backend"], "container")
+        # Saving writes what the process resolved to; what matters is that
+        # removing the override leaves the file as the only source again.
+        self.assertEqual(self._reloaded().execution_backend, "container")
+
+
 if __name__ == "__main__":
     unittest.main()

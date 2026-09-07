@@ -72,6 +72,14 @@ class RunContext:
     execution_backend: str = "native"
     #: The container image, by digest where one is known. Empty when native.
     execution_image: str = ""
+    #: True when the Bowtie2 shim is supplied by the execution environment
+    #: rather than generated here.
+    #:
+    #: The image ships one at a fixed path, already pointing at the image's own
+    #: Micromamba. Writing the host's version over that path is impossible and
+    #: pointing at the host's copy is worse than useless: its contents name a
+    #: Micromamba root that does not exist inside the container.
+    shim_is_provided: bool = False
     #: Memory this run may use, resolved once and then held still.
     #:
     #: None means "not yet read". It is filled on first use and never read

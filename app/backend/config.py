@@ -31,6 +31,14 @@ METAPHLAN_INDEX = "mpa_vJan25_CHOCOPhlAnSGB_202503"
 #: default and the one that needs nothing installed beyond BioFlow itself.
 EXECUTION_BACKENDS = ("native", "container")
 
+#: Forces a backend for one process, without touching saved settings.
+#:
+#: Tests that deliberately use the real installation would otherwise inherit
+#: whichever backend the person running them happens to have chosen, so a suite
+#: would quietly start running containers because of a setting made in the
+#: interface. A scripted or CI run gets the same guarantee.
+EXECUTION_BACKEND_VARIABLE = "BIOFLOW_EXECUTION_BACKEND"
+
 #: The analysis image used when the container backend is selected.
 DEFAULT_CONTAINER_IMAGE = "localhost/bioflow-tools:0.1.0"
 
@@ -404,6 +412,13 @@ class BioFlowConfig:
             saved_image = execution.get("container_image")
             if saved_image:
                 image = str(saved_image)
+
+        # The override wins over the saved choice, and is not persisted: it
+        # decides what this process does without changing what the person using
+        # BioFlow has chosen.
+        forced = os.environ.get(EXECUTION_BACKEND_VARIABLE)
+        if forced in EXECUTION_BACKENDS:
+            backend = forced
 
         return cls(
             data_root=data_root,

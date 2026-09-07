@@ -257,7 +257,9 @@ class MetaPhlAnStage(Stage):
     # ------------------------------------------------------------------
     def prepare(self, sample: Sample, context: RunContext, log: LogCallback) -> None:
         """Put the memory-mapped Bowtie2 shim in place before profiling."""
-        if context.bowtie2_memory_mapped_shim is None or context.micromamba_binary is None:
+        if context.bowtie2_memory_mapped_shim is None:
+            return
+        if not context.shim_is_provided and context.micromamba_binary is None:
             return
         if not should_memory_map(context.total_memory()):
             log(
@@ -266,12 +268,18 @@ class MetaPhlAnStage(Stage):
                 f"far faster: mapping is only worth its cost where the index cannot fit."
             )
             return
-        shim = write_memory_mapped_shim(
-            context.bowtie2_memory_mapped_shim,
-            context.micromamba_binary,
-            context.micromamba_root,
-            context.taxonomy_environment,
-        )
+        if context.shim_is_provided:
+            # Already in place, and pointing at the Micromamba that is actually
+            # there. Writing the host's version would name a root the container
+            # does not have.
+            shim = context.bowtie2_memory_mapped_shim
+        else:
+            shim = write_memory_mapped_shim(
+                context.bowtie2_memory_mapped_shim,
+                context.micromamba_binary,
+                context.micromamba_root,
+                context.taxonomy_environment,
+            )
         log(
             f"Bowtie2 will memory-map the index, through {shim}. This machine has "
             f"{context.total_memory() / 1024 ** 3:.0f} GB of memory and the index is "

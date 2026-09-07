@@ -177,6 +177,12 @@ class RealGuiDrivenRunTests(unittest.TestCase):
         # was appending a row to the history a person actually reads.
         self._saved_history = os.environ.get("BIOFLOW_HISTORY_DB")
         os.environ["BIOFLOW_HISTORY_DB"] = str(self.root / "history.sqlite3")
+        # It wants the real tools and the real index, not whichever execution
+        # backend is selected in the interface. Without this, choosing
+        # container execution would make this drive containers instead, which
+        # is a different test than the one written here.
+        self._saved_backend = os.environ.get("BIOFLOW_EXECUTION_BACKEND")
+        os.environ["BIOFLOW_EXECUTION_BACKEND"] = "native"
         reload_config()
 
     def tearDown(self):
@@ -188,6 +194,10 @@ class RealGuiDrivenRunTests(unittest.TestCase):
             os.environ.pop("BIOFLOW_HISTORY_DB", None)
         else:
             os.environ["BIOFLOW_HISTORY_DB"] = self._saved_history
+        if self._saved_backend is None:
+            os.environ.pop("BIOFLOW_EXECUTION_BACKEND", None)
+        else:
+            os.environ["BIOFLOW_EXECUTION_BACKEND"] = self._saved_backend
         reload_config()
         self._temporary.cleanup()
 

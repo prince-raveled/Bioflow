@@ -6,6 +6,7 @@ import json
 
 from backend.config import METAPHLAN_INDEX, BioFlowConfig, get_config
 from backend.execution.backends import backend_for, execution_image_reference
+from backend.execution.container import CONTAINER_SHIM
 from backend.resources import memory_limit_bytes
 from backend.execution.stage import RunContext, RunOptions
 from backend.execution.workspace import Workspace
@@ -42,7 +43,15 @@ class Project:
             host_index_prefix=resolved.grch38_index_prefix,
             metaphlan_database=resolved.metaphlan_database_directory,
             metaphlan_index=METAPHLAN_INDEX,
-            bowtie2_memory_mapped_shim=resolved.bowtie2_memory_mapped_shim,
+            # The image ships its own shim, already pointing at the image's
+            # Micromamba; the host's copy names a root the container does not
+            # have, so pointing at it would fail at the first alignment.
+            bowtie2_memory_mapped_shim=(
+                CONTAINER_SHIM
+                if backend_for(config=resolved) == "container"
+                else resolved.bowtie2_memory_mapped_shim
+            ),
+            shim_is_provided=backend_for(config=resolved) == "container",
             micromamba_binary=resolved.micromamba_binary,
             micromamba_root=resolved.micromamba_root,
             taxonomy_environment=resolved.environment_name("taxonomy"),
