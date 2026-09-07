@@ -23,6 +23,15 @@ from backend.setup.manager import SetupManager  # noqa: E402
 
 REPOSITORY = Path(__file__).resolve().parent.parent
 DOCUMENT = REPOSITORY / "docs" / "INSTALL.md"
+README = REPOSITORY / "README.md"
+
+#: Work the interface withholds from this release. Documentation that promises
+#: any of it is describing a product that does not exist yet - and the README is
+#: the first thing anyone reads, so it is the worst place to promise it.
+WITHHELD = (
+    "humann", "functional profiling", "sparcc", "diversity analysis",
+    "scfa", "uniref", "gene famil", "pathway abundance",
+)
 
 
 class ContainerPreflightTests(unittest.TestCase):
@@ -136,9 +145,10 @@ class DocumentationTests(unittest.TestCase):
     def test_it_does_not_advertise_withheld_work(self):
         # The interface offers six stages. Documentation promising more would
         # be describing a product that does not exist yet.
-        for term in ("HUMAnN", "functional profiling", "SparCC", "diversity analysis"):
+        lowered = self.text.lower()
+        for term in WITHHELD:
             with self.subTest(term=term):
-                self.assertNotIn(term.lower(), self.text.lower())
+                self.assertNotIn(term, lowered)
 
     def test_it_says_native_execution_is_the_default(self):
         self.assertRegex(self.text, r"(?i)runs on this machine by default")
@@ -153,6 +163,84 @@ class DocumentationTests(unittest.TestCase):
 
     def test_it_warns_about_swap(self):
         self.assertIn("zram", self.text)
+
+
+@unittest.skipUnless(README.is_file(), "README.md is absent")
+class ReadmeTests(unittest.TestCase):
+    """The first thing anyone reads must describe the released pipeline."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = README.read_text(encoding="utf-8")
+
+    def setUp(self):
+        support.isolate_bioflow_data_directory(self)
+
+    def test_it_does_not_advertise_withheld_work(self):
+        lowered = self.text.lower()
+        for term in WITHHELD:
+            with self.subTest(term=term):
+                self.assertNotIn(term, lowered)
+
+    def test_it_names_only_released_components(self):
+        named = set(re.findall(r"`((?:env|db):[a-z0-9_]+)`", self.text))
+        self.assertTrue(named, "the README names no component keys")
+        real = {component.key for component in SetupManager(get_config()).components()}
+        self.assertEqual(named - real, set())
+
+    def test_it_names_only_released_environments(self):
+        # The lookahead skips bioflow-run.json and bioflow-project.json, which
+        # are result files rather than environments.
+        # \b forces the whole word to match before the lookahead is tried;
+        # without it the regex backtracks to "bioflow-ru" when "bioflow-run"
+        # is rejected. The lookahead skips bioflow-run.json and
+        # bioflow-project.json, which are result files, not environments.
+        named = set(re.findall(r"(bioflow-[a-z]+)\b(?!\.json)", self.text))
+        real = {
+            get_config().environment_name(key)
+            for key in ("qc", "hostrem", "taxonomy")
+        }
+        self.assertTrue(named, "the README names no environments")
+        self.assertEqual(
+            named - real, set(), "the README names an environment this release does not build"
+        )
+
+    def test_the_results_layout_matches_the_workspace(self):
+        """A directory named here must be one the workflow actually creates.
+
+        06_functional and reports/ were both listed long after nothing created
+        them, which is how someone comes to look for output that was never
+        going to appear.
+        """
+        from backend.execution.workspace import Workspace
+
+        real = {path.name for path in Workspace(Path("/x")).all_directories()}
+        for named in re.findall(r"├── (\d\d_[a-z_]+)/", self.text):
+            with self.subTest(directory=named):
+                self.assertIn(named, real)
+
+    def test_it_states_the_released_pipeline(self):
+        for tool in ("FastQC", "fastp", "host removal", "MetaPhlAn", "MultiQC"):
+            with self.subTest(tool=tool):
+                self.assertIn(tool, self.text)
+
+    def test_it_records_the_memory_threshold(self):
+        self.assertIn("24 GB", self.text)
+
+    def test_it_says_databases_are_not_in_the_image(self):
+        self.assertRegex(self.text, r"(?i)mounted\s+read-only")
+
+    def test_the_metaphlan_database_size_is_current(self):
+        # It said ~33 GB long after it became 51 GB, which is the difference
+        # between a download that fits and one that does not.
+        real = {
+            spec.key: spec.approximate_bytes
+            for spec in __import__(
+                "backend.setup.registry", fromlist=["DATABASES"]
+            ).DATABASES
+        }
+        gigabytes = round(real["metaphlan_chocophlan"] / 1024 ** 3)
+        self.assertIn(f"~{gigabytes} GB", self.text)
 
 
 class LauncherTests(unittest.TestCase):

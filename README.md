@@ -4,7 +4,17 @@ BioFlow is a guided desktop application for metagenomic analysis on Linux. It
 takes raw sequencing reads to organised, reproducible results without requiring
 the terminal, and it installs and manages its own analysis tools and databases.
 
-Architecture and roadmap: [docs/BIOFLOW_ARCHITECTURE.md](docs/BIOFLOW_ARCHITECTURE.md)
+The released workflow is:
+
+```text
+FASTQ → FastQC → fastp → host removal → MetaPhlAn → MultiQC
+```
+
+Single-end and paired-end reads are both supported.
+
+Installing, databases, memory and container execution:
+[docs/INSTALL.md](docs/INSTALL.md)
+Architecture: [docs/BIOFLOW_ARCHITECTURE.md](docs/BIOFLOW_ARCHITECTURE.md)
 
 ---
 
@@ -41,7 +51,7 @@ Everything lives in `~/.local/share/bioflow` (override with `BIOFLOW_DATA_DIR`):
 ```text
 ~/.local/share/bioflow/
 ├── bin/micromamba              BioFlow's private package manager
-├── micromamba-root/envs/       bioflow-qc, bioflow-hostrem, bioflow-taxonomy, bioflow-humann
+├── micromamba-root/envs/       bioflow-qc, bioflow-hostrem, bioflow-taxonomy
 ├── databases/                  reference data
 ├── logs/                       setup logs
 ├── config.json                 settings
@@ -56,15 +66,16 @@ Everything lives in `~/.local/share/bioflow` (override with `BIOFLOW_DATA_DIR`):
 | Quality control (FastQC, fastp, MultiQC) | `env:qc` | ~2 GB |
 | Host removal (Bowtie2, samtools, seqkit) | `env:hostrem` | ~1 GB |
 | Taxonomic profiling (MetaPhlAn 4) | `env:taxonomy` | ~4 GB |
-| Functional profiling (HUMAnN 3, DIAMOND) | `env:function` | ~3 GB |
 | GRCh38 reference + Bowtie2 index | `db:grch38` | ~6 GB |
-| MetaPhlAn marker database | `db:metaphlan_chocophlan` | ~33 GB |
-| HUMAnN UniRef50 (DIAMOND) | `db:humann_uniref50` | ~6 GB |
-| HUMAnN ChocoPhlAn (nucleotide) | `db:humann_chocophlan` | ~17 GB |
+| MetaPhlAn marker database | `db:metaphlan_chocophlan` | ~51 GB |
 
-**Everything: about 72 GB.** Quality control alone needs ~2 GB. QC plus host
-removal needs ~9 GB. Install only what your workflow uses — each item is
-optional and BioFlow refuses to start a download that would not fit.
+**Everything: about 64 GB**, nearly all of it the MetaPhlAn database. Quality
+control alone needs ~2 GB; QC plus host removal ~9 GB. Install only what your
+workflow uses — each item is optional, and BioFlow refuses to start a download
+that would not fit.
+
+If you already have GRCh38 or the MetaPhlAn database, point BioFlow at it
+instead of downloading another copy. See [docs/INSTALL.md](docs/INSTALL.md).
 
 ## 4. Setting up databases
 
@@ -128,7 +139,7 @@ files present but not all six), `Managed` (installed by BioFlow), or
 3. Confirm the **read layout** (see below).
 4. Choose a **results folder** and a project name.
 5. Tick the **stages** to run.
-6. Set **threads**, and choose HUMAnN's mode if you are running it.
+6. Set **threads**, and optionally a **subsample** size for MetaPhlAn.
 7. Press **Run workflow**.
 
 BioFlow validates every input file first, then checks that all required
@@ -166,13 +177,11 @@ separate files. If a mate is missing or two files are not genuine mates (BioFlow
 compares their first read identifiers), it reports the problem instead of
 guessing.
 
-Two stages take a single input because the tools require it, and BioFlow states
-this in the interface:
-
-- **MetaPhlAn** receives `R1,R2` as one comma-separated argument, its own
-  convention for paired input. The files are not merged.
-- **HUMAnN** accepts only one file, so the two host-removed mate files are
-  concatenated into `<sample>_combined.fastq.gz` first.
+**MetaPhlAn** takes both mates in one invocation, in whichever form its own
+interface requires: `R1,R2` as a single comma-separated argument when every read
+is profiled, or `-1`/`-2` with `--subsampling_paired` when you ask for a
+subsample. The files are never merged, and BioFlow states which form it used in
+the run record.
 
 ## 8. Where results are stored
 
@@ -184,11 +193,9 @@ Inside the results folder you chose, under your project name:
 ├── 02_trimmed/           trimmed FASTQ + fastp HTML/JSON reports
 ├── 03_qc_trimmed/        FastQC on the trimmed reads
 ├── 04_host_removed/      non-human reads + Bowtie2 logs
-├── 05_taxonomy/          MetaPhlAn profiles and map files
-├── 06_functional/        HUMAnN gene-family, pathway and coverage tables
+├── 05_taxonomy/          MetaPhlAn profiles and read-to-marker maps
 ├── 07_multiqc/           combined MultiQC report
 ├── logs/                 stdout and stderr for every command
-├── reports/              project reports
 ├── bioflow-project.json  samples, layout and options
 └── bioflow-run.json      per-stage results, used for resuming
 ```
@@ -226,21 +233,57 @@ Host removal's Bowtie2 summary, including the overall alignment rate, is kept at
 | **FastQC (trimmed)** | Confirm trimming improved quality | `bioflow-qc` | — |
 | **Host removal** | Align to GRCh38 with Bowtie2 and keep only non-human reads | `bioflow-hostrem` | GRCh38 index |
 | **MetaPhlAn** | Taxonomic profile from clade-specific marker genes, run offline | `bioflow-taxonomy` | MetaPhlAn markers |
-| **HUMAnN** | Gene-family and pathway abundances, normalised to copies per million | `bioflow-humann` | UniRef50 |
 | **MultiQC** | Aggregate every QC report into one document | `bioflow-qc` | — |
 
 A stage counts as successful only if its command exits zero **and** its outputs
 pass validation — a tool that finishes without producing usable results is
 reported as a failure, not a success.
 
-### HUMAnN modes
+### Memory, and why MetaPhlAn adapts to your machine
 
-The default is HUMAnN's documented protein-only mode
-(`--bypass-prescreen --bypass-nucleotide-search`), which needs only UniRef50 and
-runs on ordinary hardware. Gene families and pathway abundances are still
-produced; individual genes are not attributed to species. Switching off
-**HUMAnN protein-only mode** enables the full three-stage search, which also
-requires the ChocoPhlAn database and considerably more memory.
+MetaPhlAn's marker table needs about 7 GB before a single read is aligned, and
+the Bowtie2 index it searches is 33 GB. Below **24 GB of RAM** BioFlow
+memory-maps that index rather than loading it, and caps MetaPhlAn at one thread.
+
+That is a rescue, not an optimisation. On a 14 GB machine it is the difference
+between a run that finishes and one the kernel kills; a second thread there does
+not add throughput, it adds a second access pattern that evicts the first one's
+pages. Above 24 GB the index is loaded normally and the thread count you choose
+is used.
+
+Disk swap matters as much as RAM. A machine with only zram and no swap file had
+MetaPhlAn killed twice at 6.8 GB; the same command with a 16 GB swap file added
+ran to completion. Setup distinguishes the two and says so.
+
+## Where analysis runs
+
+By default, on this machine, in the environments BioFlow installed. That needs
+nothing further and is what makes a fresh Linux machine work.
+
+BioFlow can also run every tool in an OCI container, which pins the exact
+binaries rather than re-solving them against a live package channel. Build the
+image once with `docker/build.sh`, then set **Analysis environment** to "In a
+container" in Setup & Resources. Podman and Docker both work; Podman is
+preferred and needs no daemon.
+
+Reference databases stay on your machine either way — they are mounted
+read-only, never built into the image. Analysis containers run with no network,
+no capabilities, a read-only root filesystem, and as you rather than as root.
+
+Details in [docs/INSTALL.md](docs/INSTALL.md).
+
+## Reproducibility
+
+Two runs of the same analysis on the same data produce the same result. That is
+not automatic: Bowtie2 with several threads writes surviving reads in whatever
+order its threads finish in, and MetaPhlAn's subsampling then draws different
+reads from a differently ordered file. BioFlow passes `--reorder` and states the
+subsampling seed rather than inheriting it.
+
+Every run records what produced it — the execution backend, the container image
+by digest where one applies, the MetaPhlAn index, and the exact command each
+stage ran. A result is reused only when the inputs, the command and the backend
+are all unchanged and the outputs still verify.
 
 ## Developing BioFlow
 
