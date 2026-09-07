@@ -327,9 +327,28 @@ class SetupManager:
     # ------------------------------------------------------------------
     # Planning
     # ------------------------------------------------------------------
+    def available_keys(self, keys: list[str]) -> list[str]:
+        """The requested components this release actually offers.
+
+        Applied after dependency expansion, so asking for a withheld database
+        cannot pull in the environment that installs it either.
+        """
+        return [key for key in self._expand(keys) if component_is_available(key)]
+
+    def withheld_keys(self, keys: list[str]) -> list[str]:
+        """Requested components this release does not offer, for reporting."""
+        return [key for key in dict.fromkeys(keys) if not component_is_available(key)]
+
     def build_plan(self, keys: list[str]) -> SetupPlan:
-        """Turn a component selection into an ordered, dependency-complete plan."""
-        selected = set(self._expand(keys))
+        """Turn a component selection into an ordered, dependency-complete plan.
+
+        Components the release withholds are dropped here rather than only
+        being hidden from the listing. The interface never offers them, but the
+        headless CLI takes whatever key it is given, and installing a tool the
+        application will not run wastes a large download on something
+        unreachable.
+        """
+        selected = set(self.available_keys(keys))
         plan = SetupPlan()
         if not selected:
             return plan

@@ -39,15 +39,34 @@ def main(argv: list[str] | None = None) -> int:
         print_status(manager)
         return 0
 
-    plan = manager.build_plan(list(arguments.install))
+    requested = list(arguments.install)
+    known = {component.key for component in manager.components()}
+
+    withheld = manager.withheld_keys(requested)
+    if withheld:
+        # Silently dropping these would report "already installed" for a tool
+        # that was never offered, which is the least useful thing to say.
+        print(
+            f"Not part of this release, ignoring: {', '.join(withheld)}",
+            file=sys.stderr,
+        )
+    unknown = [key for key in requested if key not in known and key not in withheld]
+    if unknown:
+        print(f"Unknown component(s): {', '.join(unknown)}", file=sys.stderr)
+        print(f"Available: {', '.join(sorted(known))}", file=sys.stderr)
+        return 2
+    if withheld and not [key for key in requested if key in known]:
+        return 2
+
+    plan = manager.build_plan(requested)
     if plan.is_empty():
         print("Everything requested is already installed.")
         return 0
 
     print(
         f"Plan: {len(plan)} step(s), "
-        f"{human_bytes(manager.estimated_download_bytes(list(arguments.install)))} to download, "
-        f"needs {human_bytes(manager.estimated_peak_bytes(list(arguments.install)))} free while "
+        f"{human_bytes(manager.estimated_download_bytes(requested))} to download, "
+        f"needs {human_bytes(manager.estimated_peak_bytes(requested))} free while "
         f"installing — {', '.join(plan.components)}"
     )
     for index, step in enumerate(plan.steps, start=1):
@@ -58,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     failures = blocking_failures(
         run_preflight(
             manager.config,
-            manager.estimated_peak_bytes(list(arguments.install)),
+            manager.estimated_peak_bytes(requested),
             required_memory_bytes=manager.required_memory_bytes(list(arguments.install)),
         )
     )

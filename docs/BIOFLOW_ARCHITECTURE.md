@@ -60,11 +60,13 @@ and a place in the install plan without touching the GUI.
 | `env:qc` | FastQC, fastp, MultiQC | 2 GB |
 | `env:hostrem` | Bowtie2, samtools, bwa, fastp, pigz, seqkit | 1 GB |
 | `env:taxonomy` | MetaPhlAn 4, Bowtie2 | 4 GB |
-| `env:function` | HUMAnN 3, DIAMOND, Bowtie2 (Python 3.9) | 3 GB |
 | `db:grch38` | GRCh38 primary assembly + Bowtie2 index | 6 GB |
-| `db:metaphlan_chocophlan` | `mpa_vJan25_CHOCOPhlAnSGB_202503` markers | 33 GB |
-| `db:humann_chocophlan` | HUMAnN nucleotide pangenomes | 17 GB |
-| `db:humann_uniref50` | HUMAnN UniRef50 DIAMOND database | 6 GB |
+| `db:metaphlan_chocophlan` | `mpa_vJan25_CHOCOPhlAnSGB_202503` markers | 51 GB |
+
+The functional-profiling environment and its two databases exist in the registry
+but are withheld from this release by `backend/release.py`. They are not listed
+by Setup, not offered by the interface, and `build_plan()` refuses to install
+them, so nothing above can reach them. See Milestone 4.
 
 Selecting a database automatically pulls in the environment whose tools install
 it, so a user never has to reason about ordering.
@@ -125,7 +127,7 @@ Each stage declares its environment, its required databases, the commands it
 runs for a given sample, the outputs it expects, and how to validate them.
 Validation is content-aware rather than existence-based: FastQC archives must
 open, fastp must report surviving reads, Bowtie2 must emit an alignment rate,
-MetaPhlAn's profile must contain clade rows, HUMAnN's tables must contain data.
+MetaPhlAn's profile must contain clade rows.
 
 A stage succeeds only when its command exits zero **and** validation passes. A
 tool that finishes without producing usable output is a failure.
@@ -150,7 +152,9 @@ Both are first-class. Detection from `_R1`/`_R2` naming is a proposal the user
 confirms or overrides in the interface. Pairing is preserved through trimming
 and host removal, with mates kept in separate files. Two stages take a single
 input because their tools require it, and only those two: MetaPhlAn receives
-`R1,R2` as one comma-separated argument, and HUMAnN receives a concatenated
+`R1,R2` as one comma-separated argument, or `-1`/`-2` with
+`--subsampling_paired` when a subsample is requested. An earlier design also fed
+a concatenated
 file, since it accepts only one input.
 
 ## Application architecture
@@ -202,8 +206,7 @@ Tool page
 ├── micromamba-root/envs/          bioflow-qc, bioflow-hostrem, ...
 ├── databases/
 │   ├── human/hg38/GRCh38_index.*
-│   ├── metaphlan/
-│   └── humann/{chocophlan,uniref}/
+│   └── metaphlan/
 ├── logs/                          Setup session logs
 ├── config.json                    User-adjustable settings
 └── history.sqlite3                Run history
@@ -264,18 +267,19 @@ page until the core backend is installed.
 
 ### The workflow
 
-The **Run workflow** page executes the documented pipeline: FastQC on raw reads,
+The **Run workflow** page executes the released pipeline: FastQC on raw reads,
 fastp trimming, FastQC on trimmed reads, Bowtie2 host removal, MetaPhlAn
-taxonomic profiling, HUMAnN functional profiling, and a MultiQC summary. Stages
-are individually selectable, single-end and paired-end are both supported, and
-the run refuses to start when a required backend is missing.
+taxonomic profiling, and a MultiQC summary. Stages are individually selectable,
+single-end and paired-end are both supported, and the run refuses to start when
+a required backend is missing.
 
-Verified with real tools through BioFlow's managed runtime: the quality-control
-chain (FastQC, fastp, FastQC, MultiQC) runs end to end for both single-end and
-paired-end input, resumes correctly, and reports failure when a tool fails or
-its output does not validate. Host removal, MetaPhlAn and HUMAnN are implemented
-and unit-tested against the specification but have not yet been executed
-against their real databases.
+Verified with real tools against the real reference databases, not only against
+the specification. Both layouts have completed end to end on SRR10692360
+(100,000 PE150 pairs): paired in 92.7 minutes with 30/30 checks and 41 clades,
+single-end in 90.9 minutes with 19/19 checks and 66 clades. The standalone
+MetaPhlAn page produced a bit-identical result to the workflow. Resume works,
+and a stage that fails, or whose output does not validate, is reported as a
+failure rather than a success.
 
 ### Individual tools
 
@@ -319,10 +323,66 @@ Every execution records its start and finish time, module name, status, input
 summary, output folder, exact generated command, log path, and exit code, in a
 local SQLite database. No cloud service or external database is involved.
 
+## Execution backends
+
+Analysis commands reach a tool through one resolver, and there are two
+implementations of it. Everything above them - `Stage`, `Workspace`,
+`PipelineExecutor`, `CommandRunner`, the validators and the checkpoint - is
+unchanged and unaware of which is in use.
+
+| | native | container |
+|---|---|---|
+| resolves to | `micromamba run -r <data root>/micromamba-root -n <env> <tool>` | `podman run <flags> IMAGE micromamba run -r /opt/conda -n <env> <tool>` |
+| needs | nothing beyond what BioFlow installs | Podman or Docker, and the image |
+| default | yes | chosen explicitly |
+
+The image carries the same Micromamba environments under the same names, so the
+inner command is byte-identical between the two and a container result can be
+compared with a native one argument by argument. A test asserts that equality
+for every stage and both read layouts.
+
+Reference databases are never built into the image. They are mounted read-only
+from the host, so one copy serves both backends and a tool bugfix does not become
+a 51 GB re-download. Host paths are mounted at the same path inside the
+container, so no argument is rewritten and logs, tool errors and the paths tools
+embed in their reports all name directories the user recognises.
+
+Analysis containers run with no network, no capabilities, a read-only root
+filesystem, a writable tmpfs on `/tmp`, and as the invoking user. BioFlow never
+uses `--privileged`, never `--network=host`, and never mounts a runtime socket.
+SELinux confinement is dropped for the container rather than relabelling the
+mounts, because relabelling would rewrite the labels of a 51 GB database and the
+private-label form would leave it unreadable by the native backend.
+
+The backend forms part of the checkpoint fingerprint. Four of the six stages
+pass no argument that differs between backends, so without that identity a
+switch would mark them up to date from the other backend's results and re-run
+only MetaPhlAn, leaving a record claiming one execution environment for a result
+mostly produced by the other.
+
+## Reproducibility
+
+Two runs of the same analysis on the same data produce the same result, which is
+not automatic. Bowtie2 with several threads writes surviving reads in whatever
+order its threads finish in, and MetaPhlAn's subsampling then draws from the file
+in order, so two runs profiled different reads - measured at a Jaccard overlap of
+0.189 between the mapped reads of two runs. `--reorder` fixes the ordering and
+the subsampling seed is stated rather than inherited.
+
 ## Known hardware constraints
 
-The full reference-data set is roughly 62 GB, so every database is opt-in and
-gated behind a disk-space check.
+The released reference-data set is roughly 57 GB - almost entirely the MetaPhlAn
+database at 51 GB - so every database is opt-in and gated behind a disk-space
+check before a download starts.
+
+MetaPhlAn's marker table needs about 7 GB of anonymous memory before a read is
+aligned, and the Bowtie2 index it searches is 33 GB. Below 24 GB of installed
+memory BioFlow memory-maps that index rather than loading it and caps MetaPhlAn
+at one thread: a second thread there does not add throughput, it adds a second
+access pattern that evicts the first one's pages. Measured on a 14 GB machine,
+two threads produced 21.8 million major faults and 35.3 TB of re-read over 6h37m
+without finishing, where one thread completed in 92 minutes. Disk swap matters
+as much as RAM; zram alone had profiling killed twice at 6.8 GB.
 
 HUMAnN's full three-stage mode (MetaPhlAn prescreen → ChocoPhlAn nucleotide
 search → DIAMOND translated search) assumes an HPC-class machine. On a laptop or
@@ -333,7 +393,13 @@ trade-off must be stated in the interface and in generated reports: gene
 families and pathway abundances are still produced, but gene calls are not
 attributed to individual species.
 
-## Recommended roadmap
+## Roadmap
+
+Milestones 1 to 3 are complete and released. Milestone 4 is deliberately
+withheld: the code exists and is tested, but `backend/release.py` gates it out
+of the interface and out of the installer, because functional profiling needs
+compute this release does not assume.
+
 
 ### Milestone 1 — Make the current foundation release-ready
 
