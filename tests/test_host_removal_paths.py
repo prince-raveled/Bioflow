@@ -110,8 +110,12 @@ class CommandConstructionTests(unittest.TestCase):
     def test_the_rest_of_the_command_is_unchanged(self):
         sample = Sample("plain", ReadLayout.SINGLE, self.root / "plain.fastq.gz")
         command = self.command_for(sample)
-        self.assertEqual(command[:6], [
-            "bowtie2", "--very-sensitive", "-p", "2", "-x", str(self.root / "idx"),
+        # --reorder is deliberate: without it Bowtie2 writes the surviving
+        # reads in whatever order its threads finished in, and MetaPhlAn's
+        # subsampling then draws different reads on each run.
+        self.assertEqual(command[:7], [
+            "bowtie2", "--very-sensitive", "--reorder",
+            "-p", "2", "-x", str(self.root / "idx"),
         ])
         self.assertEqual(command[-2:], ["-S", "/dev/null"])
 

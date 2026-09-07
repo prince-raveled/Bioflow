@@ -43,6 +43,15 @@ from backend.samples import Sample
 #: moved between runs would invalidate results that are still perfectly good.
 MAXIMUM_THREADS = 1
 
+#: The seed MetaPhlAn uses to choose which reads a subsampled run profiles.
+#:
+#: The same value MetaPhlAn defaults to, passed explicitly so the command
+#: records it. Note that a seed alone does not make a subsampled run
+#: reproducible: the selection is drawn from the reads in file order, so it
+#: also depends on host removal writing them in a stable order - which is what
+#: Bowtie2's --reorder is for.
+SUBSAMPLING_SEED = "1992"
+
 #: Total RAM at or above which Bowtie2 should load its index normally instead
 #: of memory-mapping it.
 #:
@@ -370,6 +379,13 @@ class MetaPhlAnStage(Stage):
             command += ["--subsampling_paired", str(subsample)]
         elif subsample:
             command += ["--subsampling", str(subsample), "--mapping_subsampling"]
+        if subsample:
+            # MetaPhlAn already defaults to this exact value, so naming it
+            # changes no result. It is named anyway because a seed that is
+            # inherited is a seed that can change underneath a saved analysis:
+            # the run record then describes a selection it cannot reproduce.
+            # Stated here, the command says what it did.
+            command += ["--subsampling_seed", SUBSAMPLING_SEED]
 
         # Only where the index has to be mapped. Pointing MetaPhlAn at the shim
         # on a machine with room to load the index would cost far more than it

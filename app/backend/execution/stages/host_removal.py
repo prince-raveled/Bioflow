@@ -82,6 +82,20 @@ class HostRemovalStage(Stage):
         command = [
             "bowtie2",
             "--very-sensitive",
+            # Without this, the surviving reads come out in whatever order the
+            # threads finished in, so two identical runs write the same reads
+            # to different lines of the file. That is invisible here - the
+            # reads are the same and every check still passes - and it becomes
+            # visible one stage later, because MetaPhlAn's subsampling draws
+            # from the file in order. Two runs of the same analysis then
+            # profile different reads and report different abundances.
+            #
+            # Measured on 20,000 pairs with -p 8: two runs without --reorder
+            # produced different read orders, two runs with it produced
+            # identical ones, and all four contained exactly the same reads.
+            # It costs some buffering; a result that cannot be reproduced costs
+            # more.
+            "--reorder",
             "-p",
             context.threads,
             "-x",
