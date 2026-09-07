@@ -107,6 +107,23 @@ else
     ( cd "$APP_ROOT/app" && "$PYTHON_ENV/bin/python" -m backend.setup.cli --status )
 fi
 
+# ----------------------------------------------------------------------
+# Container execution is optional, and stays optional.
+#
+# Analysis runs on this machine by default, in environments BioFlow installs
+# itself, which is what lets a fresh Linux machine work without asking anything
+# of whoever is using it. Containers are for pinning the exact tool binaries -
+# worth having, never required - so this reports what is available and does not
+# install a runtime or fail without one.
+# ----------------------------------------------------------------------
+if command -v podman >/dev/null; then
+    CONTAINER_NOTE="Podman is installed, so container execution is available if you want it."
+elif command -v docker >/dev/null; then
+    CONTAINER_NOTE="Docker is installed, so container execution is available if you want it."
+else
+    CONTAINER_NOTE="No container runtime found. Analysis runs on this machine, which needs nothing further."
+fi
+
 cat <<EOF
 
 BioFlow's desktop environment is ready. Start it with:
@@ -115,4 +132,14 @@ BioFlow's desktop environment is ready. Start it with:
 Install analysis backends from the Setup & Resources page inside the app, or
 headlessly with:
   cd $APP_ROOT/app && $PYTHON_ENV/bin/python -m backend.setup.cli --install env:qc env:hostrem db:grch38
+
+Reference databases are downloaded once and reused. They are large - GRCh38 is
+several GB and the MetaPhlAn database around 51 GB - and live outside the
+application, so they survive upgrades and can be shared between machines. If you
+already have them, point BioFlow at them from Setup & Resources instead of
+downloading again.
+
+$CONTAINER_NOTE
+  Build the image:  $APP_ROOT/docker/build.sh
+  Then choose "In a container" under Analysis environment in Setup & Resources.
 EOF

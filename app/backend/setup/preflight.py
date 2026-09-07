@@ -356,7 +356,63 @@ def run_preflight(
             blocking=True,
         )
     )
+
+    checks.append(container_check(config))
     return checks
+
+
+def container_check(config: BioFlowConfig) -> SystemCheck:
+    """Whether the selected execution backend can actually run.
+
+    Reported for both backends rather than only when containers are selected:
+    somebody deciding whether to switch wants to know what is available before
+    switching, and somebody who has switched wants to find out here rather than
+    part-way through an analysis.
+
+    Never blocking. Native execution needs none of this, and a container run
+    that cannot start fails with a message naming what to install - failing
+    setup outright would stop someone installing the databases they need for
+    the native path.
+    """
+    # Imported here: preflight is reached from the setup CLI on machines that
+    # may have no container support at all, and this must not make that path
+    # depend on the container module loading.
+    from backend.execution.container import ContainerResolver, detect_runtime
+
+    runtime = detect_runtime()
+    selected = config.execution_backend == "container"
+
+    if runtime is None:
+        return SystemCheck(
+            "Container execution",
+            not selected,
+            (
+                "Selected, but no container runtime is installed. Install Podman, "
+                "or switch to running on this machine in Setup & Resources."
+                if selected
+                else "Not installed. Analysis runs on this machine, which needs nothing further."
+            ),
+        )
+
+    resolver = ContainerResolver(config=config, image=config.container_image)
+    if not resolver.image_present():
+        return SystemCheck(
+            "Container execution",
+            not selected,
+            (
+                f"{runtime} is installed, but the image {config.container_image} "
+                f"is not available. Build it with docker/build.sh."
+                if selected
+                else f"{runtime} is available; the image {config.container_image} is not built yet."
+            ),
+        )
+
+    where = "Analysis runs in" if selected else "Available:"
+    return SystemCheck(
+        "Container execution",
+        True,
+        f"{where} {config.container_image} using {runtime}",
+    )
 
 
 def blocking_failures(checks: list[SystemCheck]) -> list[SystemCheck]:
