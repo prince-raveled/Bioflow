@@ -76,6 +76,79 @@ class ExecutableBitTests(unittest.TestCase):
                 self.assertTrue((REPOSITORY / relative).is_file())
 
 
+class SystemLibraryCheckTests(unittest.TestCase):
+    """The installer's check for the libraries Qt needs.
+
+    Both problems here were found by running the installer on Debian in a
+    container, and neither is visible on the machine BioFlow was written on.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = (REPOSITORY / "scripts" / "install_bioflow_linux.sh").read_text(
+            encoding="utf-8"
+        )
+
+    def test_detection_does_not_depend_on_ldconfig_being_on_the_path(self):
+        """The defect that made Debian unusable.
+
+        `ldconfig -p` was the only test. On Debian /usr/sbin is not on an
+        ordinary user's PATH, so the command was not found, the error went to
+        /dev/null, and every library was reported missing. Installing the
+        packages changed nothing and the script asked for them again - a loop
+        with no way out. Ubuntu escaped only because it happens to put
+        /usr/sbin on the user PATH.
+        """
+        self.assertIn("ctypes.CDLL", self.script,
+                      "the check must ask the loader, not a command on PATH")
+        for absolute in ("/usr/sbin/ldconfig", "/sbin/ldconfig"):
+            with self.subTest(path=absolute):
+                self.assertIn(absolute, self.script)
+
+    def test_it_checks_the_libraries_the_qt_plugin_actually_links_against(self):
+        """Six were checked; the plugin needs these.
+
+        A minimal Debian installed cleanly and then died at launch on libGL,
+        which is precisely the cryptic failure this check exists to prevent.
+        """
+        for soname in (
+            "libxcb-cursor.so.0", "libxcb-icccm.so.4", "libxcb-keysyms.so.1",
+            "libxcb-image.so.0", "libxcb-render-util.so.0", "libxcb-util.so.1",
+            "libxcb-shape.so.0", "libxcb-xkb.so.1", "libX11-xcb.so.1",
+            "libxkbcommon.so.0", "libxkbcommon-x11.so.0", "libfontconfig.so.1",
+            "libdbus-1.so.3", "libglib-2.0.so.0", "libGL.so.1", "libEGL.so.1",
+        ):
+            with self.subTest(library=soname):
+                self.assertIn(soname, self.script)
+
+    def test_every_library_names_a_package_for_both_families(self):
+        import re
+
+        rows = re.findall(r"^require_lib\s+(\S+)\s+(\S+)\s+(\S+)", self.script, re.M)
+        self.assertGreaterEqual(len(rows), 16)
+        for soname, debian, fedora in rows:
+            with self.subTest(library=soname):
+                self.assertTrue(soname.startswith("lib"))
+                self.assertTrue(debian and not debian.startswith("lib" + "%"))
+                self.assertTrue(fedora)
+
+    def test_a_package_named_twice_is_only_asked_for_once(self):
+        # libxcb supplies several of these on Fedora; the message should not
+        # repeat it.
+        self.assertIn("seen[$0]++", self.script)
+
+    def test_it_proves_qt_starts_rather_than_trusting_the_list(self):
+        """The check that cannot be out of date.
+
+        A list of libraries is a guess that was wrong twice. After PyQt6 is
+        installed the script starts it, and whatever is still missing is named
+        by the loader itself.
+        """
+        self.assertIn("QT_QPA_PLATFORM=offscreen", self.script)
+        self.assertIn("from PyQt6.QtWidgets import QApplication", self.script)
+        self.assertIn("cannot start on this system", self.script)
+
+
 class ReleaseGateTests(unittest.TestCase):
     """The gate has to hold everywhere a component can be installed.
 

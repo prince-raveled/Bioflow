@@ -46,20 +46,64 @@ command -v python3 >/dev/null || {
 # ----------------------------------------------------------------------
 declare -a MISSING_APT=() MISSING_DNF=()
 
+# Ask the dynamic linker whether it can load the library, which is the same
+# question Qt asks at startup and the only one that matters.
+#
+# This used to run `ldconfig -p`, which fails silently for an ordinary user on
+# Debian: /usr/sbin is not on their PATH, so the command is not found, the error
+# goes to /dev/null, and every library is reported missing. Installing the
+# packages changed nothing, so the script asked for them again - an unbreakable
+# loop for anyone on Debian. Ubuntu only escaped it by putting /usr/sbin on the
+# user PATH.
+#
+# python3 is guaranteed here: it is checked above, and the script exits without
+# it. ldconfig is still tried at its real locations as a fallback for a system
+# whose Python cannot load shared objects.
+have_lib() {
+    if python3 - "$1" <<'PY' >/dev/null 2>&1
+import ctypes, sys
+ctypes.CDLL(sys.argv[1])
+PY
+    then
+        return 0
+    fi
+    local finder
+    for finder in ldconfig /usr/sbin/ldconfig /sbin/ldconfig; do
+        if command -v "$finder" >/dev/null 2>&1 && "$finder" -p 2>/dev/null | grep -q "$1"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 require_lib() {
     # $1 = soname, $2 = Debian package, $3 = Fedora package
-    if ! ldconfig -p 2>/dev/null | grep -q "$1"; then
+    if ! have_lib "$1"; then
         MISSING_APT+=("$2")
         MISSING_DNF+=("$3")
     fi
 }
 
-require_lib libxcb-cursor.so.0    libxcb-cursor0      xcb-util-cursor
-require_lib libxkbcommon-x11.so.0 libxkbcommon-x11-0  libxkbcommon-x11
-require_lib libxcb-icccm.so.4     libxcb-icccm4       xcb-util-wm
-require_lib libxcb-keysyms.so.1   libxcb-keysyms1     xcb-util-keysyms
-require_lib libxcb-shape.so.0     libxcb-shape0       libxcb
-require_lib libxcb-xkb.so.1       libxcb-xkb1         libxcb
+# Read from PyQt6's own Qt platform plugin (libqxcb.so), not guessed: these are
+# what it links against and cannot start without. Six of them used to be
+# checked, and a minimal Debian then installed cleanly and died at launch on
+# libGL - which is exactly the cryptic failure this check exists to prevent.
+require_lib libxcb-cursor.so.0      libxcb-cursor0      xcb-util-cursor
+require_lib libxcb-icccm.so.4       libxcb-icccm4       xcb-util-wm
+require_lib libxcb-keysyms.so.1     libxcb-keysyms1     xcb-util-keysyms
+require_lib libxcb-image.so.0       libxcb-image0       xcb-util-image
+require_lib libxcb-render-util.so.0 libxcb-render-util0 xcb-util-renderutil
+require_lib libxcb-util.so.1        libxcb-util1        xcb-util
+require_lib libxcb-shape.so.0       libxcb-shape0       libxcb
+require_lib libxcb-xkb.so.1         libxcb-xkb1         libxcb
+require_lib libX11-xcb.so.1         libx11-xcb1         libX11-xcb
+require_lib libxkbcommon.so.0       libxkbcommon0       libxkbcommon
+require_lib libxkbcommon-x11.so.0   libxkbcommon-x11-0  libxkbcommon-x11
+require_lib libfontconfig.so.1      libfontconfig1      fontconfig
+require_lib libdbus-1.so.3          libdbus-1-3         dbus-libs
+require_lib libglib-2.0.so.0        libglib2.0-0        glib2
+require_lib libGL.so.1              libgl1              mesa-libGL
+require_lib libEGL.so.1             libegl1             mesa-libEGL
 
 if ! python3 -c 'import ensurepip' >/dev/null 2>&1; then
     MISSING_APT+=(python3-venv)
@@ -73,6 +117,9 @@ if (( ${#MISSING_APT[@]} )); then
 
     echo "BioFlow needs some system packages that pip cannot install." >&2
     echo >&2
+    # One package can supply several of the libraries above, so name it once.
+    mapfile -t MISSING_APT < <(printf '%s\n' "${MISSING_APT[@]}" | awk '!seen[$0]++')
+    mapfile -t MISSING_DNF < <(printf '%s\n' "${MISSING_DNF[@]}" | awk '!seen[$0]++')
     if command -v apt-get >/dev/null; then
         echo "  sudo apt install -y ${MISSING_APT[*]}" >&2
     elif command -v dnf >/dev/null; then
@@ -97,6 +144,43 @@ fi
 "$PYTHON_ENV/bin/pip" install --quiet -r "$APP_ROOT/requirements-desktop.txt"
 
 export BIOFLOW_DATA_DIR="$DATA_ROOT"
+
+# ----------------------------------------------------------------------
+# Prove Qt actually starts.
+#
+# The list above is a fast pre-check that saves a pip download when something
+# obvious is absent, but it is a list, and a list can be short. It was: six
+# libraries were checked, a minimal Debian installed cleanly, and the
+# application then died at launch on libGL - the exact cryptic failure the
+# pre-check exists to prevent. Widening it found libEGL, then libglib.
+#
+# So after PyQt6 is installed, ask it to start. Whatever is still missing is
+# named here by the loader itself, which cannot be out of date.
+# ----------------------------------------------------------------------
+QT_PROBE=$(QT_QPA_PLATFORM=offscreen "$PYTHON_ENV/bin/python" -c \
+    'from PyQt6.QtWidgets import QApplication; QApplication([])' 2>&1) || {
+    MISSING_SO=$(printf '%s\n' "$QT_PROBE" | grep -oE 'lib[A-Za-z0-9_.+-]*\.so\.[0-9]+' | head -1)
+    echo >&2
+    echo "BioFlow installed, but its interface cannot start on this system." >&2
+    if [[ -n "$MISSING_SO" ]]; then
+        echo >&2
+        echo "  A system library is missing: $MISSING_SO" >&2
+        echo >&2
+        if command -v apt-get >/dev/null; then
+            echo "  Find the package that provides it with:" >&2
+            echo "    apt-file search $MISSING_SO" >&2
+        elif command -v dnf >/dev/null; then
+            echo "  Install it with:" >&2
+            echo "    sudo dnf install -y \"*/$MISSING_SO\"" >&2
+        fi
+        echo >&2
+        echo "  Then run this script again." >&2
+    else
+        echo >&2
+        printf '%s\n' "$QT_PROBE" | tail -5 >&2
+    fi
+    exit 1
+}
 
 if [[ -n "$INSTALL_COMPONENTS" ]]; then
     echo "Installing analysis backends: $INSTALL_COMPONENTS"
